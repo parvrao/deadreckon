@@ -4,12 +4,14 @@
  * Three surfaces, and no more:
  *
  *   THE WALL      what is out there now, or at any past moment
- *   THE TICKER    what the engine noticed without being asked
- *   THE CASE FILE why it thinks so, and how to prove it wrong
+ *   THE PANEL     one rail, five tabs, every control
+ *   THE CASE FILE why the engine thinks so, and how to prove it wrong
  *
- * There is no settings page, no dashboard builder, and no second nav.
- * Every feature that is not one of those three is a feature that dilutes
- * the one thing this is for.
+ * The controls used to be spread across four places -- a chip strip over
+ * the map, a legend box, a permanent detection column, and three header
+ * buttons -- with no obvious order to look in. Now the globe owns the
+ * screen and the panel owns the controls, and the panel collapses to a
+ * 46px rail when you want the globe back.
  */
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -20,6 +22,8 @@ import { renderCaseFile, renderIncident } from './casefile.js';
 import { Scrubber } from './scrubber.js';
 import { startOrbits } from './orbits.js';
 import { architectureSheet, sourcesSheet, helpSheet } from './sheets.js';
+import { Panel, type TabId } from './panel.js';
+import { BASE_LAYERS } from './gibs.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T =>
   document.querySelector(s) as T;
@@ -50,6 +54,7 @@ const state = {
 let wall: Wall;
 let net: Net;
 let scrubber: Scrubber;
+let panel: Panel;
 
 async function boot(): Promise<void> {
   line('link <b>opening</b> ...');
@@ -115,9 +120,9 @@ function mount(watchboxes: WatchBox[]): void {
       );
       paintViewInfo(zoom);
     },
+    (id) => panel?.markFailing(id),
   );
   wall.setWatchboxes(watchboxes);
-  buildWatchbar(watchboxes);
 
   net = new Net({
     onContacts: (contacts) => {
@@ -151,6 +156,26 @@ function mount(watchboxes: WatchBox[]): void {
   });
   scrubber.setWindow(state.archiveFrom, Date.now());
 
+  panel = new Panel($('#panel'), {
+    onBaseLayer: (l) => wall.setBaseLayer(l),
+    onOverlay: (l, on) => wall.setOverlay(l, on),
+    onOverlayOpacity: (id, v) => wall.setOverlayOpacity(id, v),
+    onDomain: (d, on) => {
+      if (on) state.domains.add(d);
+      else state.domains.delete(d);
+      resubscribe();
+    },
+    onWatchbox: (w) => wall.fitBox(w),
+    onTab: (t) => {
+      if (t === 'feed') paintTicker();
+      if (t === 'time') paintTimeTab();
+    },
+  });
+  panel.setWatchboxes(watchboxes);
+  // Blue Marble is the default and is already in the style; this makes the
+  // panel's radio state and the map agree from the first frame.
+  wall.setBaseLayer(BASE_LAYERS[0]!);
+
   $('#proj-toggle').addEventListener('click', () => {
     const next = wall.currentProjection === 'globe' ? 'flat' : 'globe';
     wall.setProjection(next);
@@ -167,18 +192,20 @@ function mount(watchboxes: WatchBox[]): void {
       scrubber.seekRelative(Number((el as HTMLElement).dataset.seek)),
     ),
   );
-  document.querySelectorAll('[data-panel]').forEach((el) =>
-    el.addEventListener('click', () => {
-      const which = (el as HTMLElement).dataset.panel;
-      openSheet(
-        which === 'arch'
-          ? architectureSheet()
-          : which === 'sources'
-            ? sourcesSheet()
-            : helpSheet(),
-      );
-    }),
-  );
+  // The INFO tab is re-rendered on every tab switch, so these are bound
+  // by delegation rather than per-element.
+  $('#panel').addEventListener('click', (e) => {
+    const t = (e.target as HTMLElement).closest('[data-sheet]');
+    if (!t) return;
+    const which = (t as HTMLElement).dataset.sheet;
+    openSheet(
+      which === 'arch'
+        ? architectureSheet()
+        : which === 'sources'
+          ? sourcesSheet()
+          : helpSheet(),
+    );
+  });
 
   // First visit gets the explainer unprompted. A console that assumes you
   // already know what it is will be closed before you find out.
@@ -191,8 +218,6 @@ function mount(watchboxes: WatchBox[]): void {
     /* private browsing; not worth failing over */
   }
 
-  buildFilters();
-  paintLegend();
   paintReadout();
   paintViewInfo();
   void refreshDetections();
@@ -208,10 +233,15 @@ function mount(watchboxes: WatchBox[]): void {
       closeCase();
       closeSheet();
     }
-    if (e.key === ' ' && e.target === document.body) {
+    if (e.target !== document.body) return;
+    if (e.key === ' ') {
       e.preventDefault();
       scrubber.togglePlay();
     }
+    const tabs: TabId[] = ['layers', 'watch', 'feed', 'time', 'info'];
+    const n = Number(e.key);
+    if (n >= 1 && n <= 5) panel.open(tabs[n - 1]!);
+    if (e.key === 'g' || e.key === 'G') $('#proj-toggle').click();
   });
 }
 
@@ -286,40 +316,10 @@ function visibleDetections(): DetectionPin[] {
 
 /* -------------------------------------------------------------- ticker */
 
-const RULES = [
-  'SPOOF_DISCONTINUITY',
-  'DARK_VESSEL',
-  'AIRSPACE_VOID',
-  'GNSS_BLOOM',
-  'RENDEZVOUS',
-  'LOITER',
-  'SQUAWK_EMERGENCY',
-  'THERMAL_ANOMALY',
-  'SEISMIC_SHALLOW',
-];
-
-function buildFilters(): void {
-  const el = $('#tk-filters');
-  el.innerHTML = '';
-  for (const r of RULES) {
-    const b = document.createElement('button');
-    b.className = 'btn';
-    b.textContent = r.replace(/_/g, ' ');
-    b.addEventListener('click', () => {
-      if (state.filters.has(r)) state.filters.delete(r);
-      else state.filters.add(r);
-      b.classList.toggle('on');
-      paintTicker();
-      wall.setDetections(visibleDetections());
-    });
-    el.append(b);
-  }
-}
-
 function paintTicker(): void {
   const list = visibleDetections();
-  const el = $('#tk-list');
-  $('#tk-count').textContent = String(list.length);
+  const el = panel?.feedBody;
+  if (!el) return; // FEED tab is not open; nothing to paint into
 
   if (!list.length) {
     const filtered = state.filters.size > 0 && state.detections.length > 0;
@@ -372,10 +372,34 @@ function paintTicker(): void {
       void openCase(id);
     }),
   );
+}
 
-  const worst = list.reduce((a, b) => (b.severity > a.severity ? b : a));
-  $('#tk-foot').textContent =
-    `peak ${worst.severity} · ${list.filter((d) => d.severity >= 70).length} above 70`;
+/** The TIME tab: what the archive actually holds, and what that costs. */
+function paintTimeTab(): void {
+  const el = panel?.timeBody;
+  if (!el) return;
+  const span = Date.now() - state.archiveFrom;
+  el.innerHTML =
+    `<p class="pn-note" style="margin-top:0">
+       There is no record button. The archive fills continuously, so drag
+       the timeline at the bottom to any past moment.
+     </p>
+     <div class="pn-sec">
+       <div class="pn-k">ARCHIVE</div>
+       <div class="kv-min">
+         <span>from</span><span>${new Date(state.archiveFrom).toISOString().slice(0, 16)}Z</span>
+         <span>span</span><span>${(span / 3600_000).toFixed(1)} hours</span>
+         <span>mode</span><span>${state.replayAt ? 'REPLAY' : 'LIVE'}</span>
+       </div>
+     </div>
+     <div class="pn-sec">
+       <div class="pn-k">RETENTION</div>
+       <p class="pn-note" style="padding:0">
+         Full fidelity for 12 hours, then thinned to one fix per target per
+         30 minutes out to 7 days. A dark-vessel verdict only needs the fix
+         either side of a gap, so the thinning costs nothing analytically.
+       </p>
+     </div>`;
 }
 
 /* ------------------------------------------------------------ casefile */
@@ -460,7 +484,6 @@ function paintReadout(note = ''): void {
     rd('contacts', state.liveContacts.toLocaleString()) +
     rd('detections 24h', String(state.detections.length), high ? 'warn' : '') +
     rd('sev 70+', String(high), high ? 'bad' : 'good') +
-    rd('rx', fmtBytes(state.bytesIn)) +
     rd('mode', state.replayAt ? 'REPLAY' : 'LIVE', state.replayAt ? 'warn' : 'good');
 }
 
@@ -477,76 +500,6 @@ function paintReadout(note = ''): void {
  * one click. If a system does not tell you where its attention is, the
  * reader assumes it has none.
  */
-function buildWatchbar(boxes: WatchBox[]): void {
-  if (!boxes.length) return;
-  const bar = document.createElement('div');
-  bar.id = 'watchbar';
-  bar.innerHTML =
-    `<div class="wb-k">WATCHING ${boxes.length}</div>` +
-    boxes
-      .map((b, i) => `<button class="btn wb" data-i="${i}">${esc(b.label)}</button>`)
-      .join('');
-  $('#wall').append(bar);
-
-  bar.querySelectorAll('.wb').forEach((el) =>
-    el.addEventListener('click', () => {
-      const b = boxes[Number((el as HTMLElement).dataset.i)];
-      if (b) wall.fitBox(b);
-    }),
-  );
-}
-
-/**
- * The legend is also the domain control.
- *
- * It previously listed five colours and did nothing, which is a caption,
- * not an interface. Making the rows toggle the live subscription turns
- * the one piece of chrome that was already explaining the map into the
- * place you steer it from, and costs no extra screen.
- */
-const DOMAIN_ROWS: { key: string; color: string; label: string }[] = [
-  { key: 'air', color: '#FFA200', label: 'air' },
-  { key: 'sea', color: '#00D9FF', label: 'sea' },
-  { key: 'orbit', color: '#A78BFA', label: 'orbit' },
-  { key: 'geo', color: '#FF7A45', label: 'seismic' },
-  { key: 'thermal', color: '#FF4D4D', label: 'thermal' },
-];
-
-function paintLegend(): void {
-  const toggles = DOMAIN_ROWS.map(
-    (d) =>
-      `<div class="lg tog ${state.domains.has(d.key) ? 'on' : ''}" data-d="${d.key}">
-         <i style="background:${d.color}"></i><span>${d.label}</span>
-       </div>`,
-  ).join('');
-
-  const statics = [
-    ['#FFD666', 'GNSS degraded'],
-    ['#788C9E', 'stale / dark'],
-  ]
-    .map(([c, l]) => `<div class="lg"><i style="background:${c}"></i><span>${l}</span></div>`)
-    .join('');
-
-  $('#legend').innerHTML =
-    `<div class="lg-k">LAYERS &middot; click to toggle</div>` + toggles + `<hr>` + statics;
-
-  $('#legend')
-    .querySelectorAll('.tog')
-    .forEach((n) =>
-      n.addEventListener('click', () => {
-        const d = (n as HTMLElement).dataset.d!;
-        if (state.domains.has(d)) {
-          // Never let the user switch everything off and conclude it broke.
-          if (state.domains.size > 1) state.domains.delete(d);
-        } else {
-          state.domains.add(d);
-        }
-        paintLegend();
-        resubscribe();
-      }),
-    );
-}
-
 function resubscribe(): void {
   const b = wall.map.getBounds();
   net.subscribe(

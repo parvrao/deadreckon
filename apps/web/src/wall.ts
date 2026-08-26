@@ -41,6 +41,7 @@ import { ScatterplotLayer, PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { ObsFlag } from '@deadreckon/core';
 import type { Contact } from './net.js';
 import { buildStyle, watchboxGeoJSON, type Projection, type WatchBox } from './basemap.js';
+import { GIBS_ATTRIBUTION, tileUrls, type GibsLayer } from './gibs.js';
 
 export type { WatchBox };
 
@@ -86,12 +87,18 @@ export class Wall {
   private pulse = 0;
   private projection: Projection = 'globe';
   private styleReady = false;
+  private activeBase = 'bluemarble';
+  private activeOverlays = new Set<string>();
+  private pendingBase: { l: GibsLayer; date?: string } | null = null;
+  /** Layer ids whose tiles are 404ing or erroring. */
+  private tileErrors = new Set<string>();
 
   constructor(
     container: string,
     private readonly onPick: (c: Contact | null) => void,
     private readonly onDetectionPick: (d: DetectionPin) => void,
     private readonly onMove: (b: LngLatBounds, zoom: number) => void,
+    private readonly onLayerError?: (id: string) => void,
   ) {
     this.map = new MapLibreMap({
       container,
@@ -126,6 +133,11 @@ export class Wall {
     this.map.on('load', () => {
       this.styleReady = true;
       this.pushWatchboxes();
+      if (this.pendingBase) {
+        const { l, date } = this.pendingBase;
+        this.pendingBase = null;
+        this.setBaseLayer(l, date);
+      }
       // A slow arc onto the watchbox, so the first thing you see is a
       // recognisable planet rather than a rectangle you have to decode.
       this.map.easeTo({ center: [56.3, 26.5], zoom: 4.6, duration: 2600 });
@@ -156,6 +168,21 @@ export class Wall {
     };
     this.map.on('moveend', emit);
     this.map.on('zoomend', emit);
+
+    // Tile failures, attributed back to the layer that caused them.
+    this.map.on('error', (e: unknown) => {
+      const src = (e as { sourceId?: string }).sourceId;
+      if (!src) return;
+      const id = src === 'satellite' ? this.activeBase : src.replace(/^ov-/, '');
+      if (!this.tileErrors.has(id)) {
+        this.tileErrors.add(id);
+        console.warn(
+          `[wall] layer "${id}" is not serving tiles. Most likely its ` +
+            `GoogleMapsCompatible_Level is wrong in gibs.ts.`,
+        );
+        this.onLayerError?.(id);
+      }
+    });
 
     // 8 fps is enough for a pulse and costs almost nothing.
     setInterval(() => {
@@ -191,6 +218,108 @@ export class Wall {
 
   get currentProjection(): Projection {
     return this.projection;
+  }
+
+  /* ------------------------------------------------------- GIBS layers */
+
+  /**
+   * Swap the base imagery.
+   *
+   * Base layers are mutually exclusive, so this replaces the single
+   * `satellite` raster source rather than stacking. MapLibre cannot
+   * retarget a source's tile URLs in place, so the source and its layer
+   * are removed and rebuilt, keeping the layer at the very bottom of the
+   * draw order.
+   */
+  setBaseLayer(l: GibsLayer, date?: string): void {
+    if (!this.styleReady) {
+      this.pendingBase = { l, date };
+      return;
+    }
+    this.activeBase = l.id;
+    try {
+      if (this.map.getLayer('satellite')) this.map.removeLayer('satellite');
+      if (this.map.getSource('satellite')) this.map.removeSource('satellite');
+
+      this.map.addSource('satellite', {
+        type: 'raster',
+        tiles: tileUrls(l, date),
+        tileSize: 256,
+        maxzoom: l.matrix,
+        attribution: GIBS_ATTRIBUTION,
+      });
+      // Immediately above the background, below everything else.
+      this.map.addLayer(
+        {
+          id: 'satellite',
+          type: 'raster',
+          source: 'satellite',
+          paint: {
+            'raster-opacity': 0.85,
+            'raster-saturation': l.id === 'nightlights' ? 0.35 : -0.2,
+            'raster-contrast': l.id === 'nightlights' ? 0.25 : 0.08,
+          },
+        },
+        'boundary-country',
+      );
+    } catch (err) {
+      console.error('[wall] base layer swap failed:', (err as Error).message);
+    }
+  }
+
+  /** Toggle an additive overlay on top of the imagery, below the labels. */
+  setOverlay(l: GibsLayer, on: boolean, date?: string): void {
+    const sid = `ov-${l.id}`;
+    try {
+      if (!on) {
+        if (this.map.getLayer(sid)) this.map.removeLayer(sid);
+        if (this.map.getSource(sid)) this.map.removeSource(sid);
+        this.activeOverlays.delete(l.id);
+        return;
+      }
+      if (this.map.getSource(sid)) return;
+
+      this.map.addSource(sid, {
+        type: 'raster',
+        tiles: tileUrls(l, date),
+        tileSize: 256,
+        maxzoom: l.matrix,
+        attribution: GIBS_ATTRIBUTION,
+      });
+      this.map.addLayer(
+        {
+          id: sid,
+          type: 'raster',
+          source: sid,
+          paint: { 'raster-opacity': l.opacity ?? 0.7 },
+        },
+        'label-country',
+      );
+      this.activeOverlays.add(l.id);
+    } catch (err) {
+      console.error(`[wall] overlay ${l.id} failed:`, (err as Error).message);
+    }
+  }
+
+  setOverlayOpacity(id: string, v: number): void {
+    const sid = `ov-${id}`;
+    if (this.map.getLayer(sid)) {
+      this.map.setPaintProperty(sid, 'raster-opacity', v);
+    }
+  }
+
+  /**
+   * Which layers are failing to serve tiles.
+   *
+   * GIBS addresses each layer under a `GoogleMapsCompatible_Level{N}` set
+   * where N is that layer's own maximum zoom. Get N wrong and every
+   * request 404s, which MapLibre renders as nothing at all. Without this,
+   * a misconfigured layer is indistinguishable from a layer that is
+   * working and simply has no data, which is the worst possible ambiguity
+   * in a tool whose whole point is telling those two things apart.
+   */
+  get failingLayers(): Set<string> {
+    return this.tileErrors;
   }
 
   private pushWatchboxes(): void {

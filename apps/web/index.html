@@ -32,38 +32,24 @@
       >
       <div id="boot-log"></div>
     </div>
+
     <div id="app" hidden>
       <header id="bar">
         <div class="brand">
           <span class="mark"></span>
           <span class="name">DEADRECKON</span>
-          <span class="tag">open-source spatial intelligence</span>
         </div>
         <div id="readout" class="readout"></div>
-        <div class="linkbar">
-          <button class="btn on" id="proj-toggle" title="globe / flat">◍ GLOBE</button>
-          <button class="btn" data-panel="help">? HELP</button>
-          <button class="btn" data-panel="arch">ARCHITECTURE</button>
-          <button class="btn" data-panel="sources">SOURCES</button>
-        </div>
+        <button class="btn on" id="proj-toggle" title="globe / flat (G)">◍ GLOBE</button>
       </header>
+
+      <!-- One rail, five tabs. Everything lives here. -->
+      <aside id="panel"></aside>
 
       <main id="wall">
         <div id="map"></div>
-        <div id="crosshair"></div>
-        <div id="legend"></div>
         <div id="viewinfo"></div>
       </main>
-
-      <aside id="ticker">
-        <div class="tk-head">
-          <span>DETECTION FEED</span>
-          <span id="tk-count" class="dim">0</span>
-        </div>
-        <div id="tk-filters"></div>
-        <div id="tk-list"></div>
-        <div class="tk-foot dim" id="tk-foot"></div>
-      </aside>
 
       <footer id="scrubber">
         <div class="sc-transport">
