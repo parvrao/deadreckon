@@ -64,6 +64,8 @@ export class Ingest {
   private ac = new AbortController();
   private sea: SeaStream | null = null;
   private lastBaselineHour = -1;
+  /** Rotates through the watchbox list so no single cycle polls all ten. */
+  private airCursor = 0;
 
   watchboxes: WatchboxRow[] = [];
 
@@ -104,7 +106,15 @@ export class Ingest {
 
     const ok = httpStatus >= 200 && httpStatus < 300;
     if (!ok || obs.length === 0) {
-      await noteIngest(source.id, ok, httpStatus, 0, ok ? undefined : `HTTP ${httpStatus}`);
+      // "HTTP 0" told us nothing when adsb.lol started refusing us. A
+      // zero status means the request never completed at all, which is a
+      // different problem from a 429 and needs saying so.
+      const why = !ok
+        ? httpStatus === 0
+          ? 'connection failed or timed out (no HTTP response)'
+          : `HTTP ${httpStatus}`
+        : undefined;
+      await noteIngest(source.id, ok, httpStatus, 0, why);
       return;
     }
 
@@ -137,16 +147,38 @@ export class Ingest {
   /* ------------------------------------------------------------- air */
 
   /**
-   * Targeted, not exhaustive. Watchbox circles plus two global
-   * high-signal queries. Scraping the whole sky every ten seconds would be
-   * antisocial, would get us rate-limited within the hour, and would bury
-   * the signal we are actually looking for.
+   * Targeted, rotating, and deliberately slow.
+   *
+   * The first version polled all ten watchboxes plus four global queries
+   * every ten seconds. With the token bucket that is a sustained ~60
+   * requests a minute at a free community feed, and adsb.lol started
+   * refusing connections within the hour: seven consecutive failures with
+   * no HTTP status at all. It also produced 216,000 observations an hour,
+   * which would have filled a 1 GB database in twelve hours.
+   *
+   * Now each cycle takes a slice of the watchbox list and moves on, so
+   * every box is still covered, just over a couple of minutes instead of
+   * every ten seconds. Vessels and aircraft do not move meaningfully in
+   * ten seconds, so nothing analytically useful was being bought with that
+   * rate. The global military and squawk queries run on every cycle
+   * because they are one request each and carry the highest signal.
+   *
+   * Being a good citizen of somebody else's free API is not politeness,
+   * it is the difference between having a data source and not.
    */
   async pollAir(): Promise<void> {
     const backedOff = await sourcesBackedOff();
 
     if (!backedOff.has(SOURCE_BY_KEY.get('adsb_lol')!.id)) {
-      for (const b of this.watchboxes) {
+      const perCycle = Math.max(1, num('AIR_BOXES_PER_CYCLE', 3));
+      const slice: WatchboxRow[] = [];
+      for (let i = 0; i < Math.min(perCycle, this.watchboxes.length); i++) {
+        const b = this.watchboxes[this.airCursor % this.watchboxes.length];
+        this.airCursor++;
+        if (b) slice.push(b);
+      }
+
+      for (const b of slice) {
         if (this.ac.signal.aborted) return;
         const lat = (b.min_lat + b.max_lat) / 2;
         const lon = (b.min_lon + b.max_lon) / 2;
@@ -352,8 +384,14 @@ export class Ingest {
     console.log(`[baseline] updated ${counts.size} cells`);
   }
 
-  async retention(): Promise<{ thinned: number; purged: number }> {
-    return runRetention(num('RETAIN_RAW_H', 48), num('RETAIN_TRACK_H', 720));
+  async retention(): Promise<{ thinned: number; purged: number; emergency: number }> {
+    return runRetention(num('RETAIN_RAW_H', 12), num('RETAIN_TRACK_H', 168), {
+      thinMinutes: num('RETAIN_THIN_MIN', 30),
+      // Render's free Postgres is 1 GB. Default the backstop to that
+      // rather than leaving it off, because the failure mode of a full
+      // database is total and silent.
+      capBytes: num('DB_CAP_BYTES', 1_000_000_000),
+    });
   }
 
   /* --------------------------------------------------------- shutdown */

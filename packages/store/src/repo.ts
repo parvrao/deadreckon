@@ -78,6 +78,46 @@ export async function recordProvenance(p: {
 /* ----------------------------------------------------------- observation */
 
 /**
+ * Keys worth keeping on every single observation.
+ *
+ * The first version stored the whole props blob on every row, which meant
+ * every fix carried the target's name, type, registration, MMSI, IMO,
+ * call sign and destination -- all of which are static per entity and
+ * already stored once in `entity`. At 216,000 observations an hour that
+ * redundancy was the single largest consumer of a 1 GB database, filling
+ * it in roughly twelve hours.
+ *
+ * What survives here is only what changes fix to fix AND is read by a
+ * detection rule. Identity is a property of the entity, not of every
+ * sighting of it.
+ */
+const KEEP_PROPS = new Set([
+  'squawk', // SQUAWK_EMERGENCY
+  'nic', // GNSS_BLOOM
+  'nacP', // GNSS_BLOOM
+  'emergency', // SQUAWK_EMERGENCY
+  'navStatus', // sea context
+  'heading', // differs from course over ground
+  'mag', // SEISMIC_SHALLOW
+  'depthKm', // SEISMIC_SHALLOW
+  'frp', // THERMAL_ANOMALY
+  'brightnessK', // THERMAL_ANOMALY
+  'dayNight', // THERMAL_ANOMALY
+]);
+
+function slimProps(props: Record<string, unknown> | undefined): string | null {
+  if (!props) return null;
+  let out: Record<string, unknown> | null = null;
+  for (const k of Object.keys(props)) {
+    if (!KEEP_PROPS.has(k)) continue;
+    const v = props[k];
+    if (v === null || v === undefined) continue;
+    (out ??= {})[k] = v;
+  }
+  return out ? JSON.stringify(out) : null;
+}
+
+/**
  * Bulk insert via unnest. One round trip, one plan, one parse for an
  * arbitrary number of rows -- versus N round trips for naive inserts.
  * At 10k aircraft per tick that is the difference between 40 ms and 12 s.
@@ -116,7 +156,8 @@ export async function insertObservations(obs: readonly Observation[]): Promise<n
     gh[i] = geohashEncode(o.lat, o.lon, 5);
     src[i] = o.sourceId ?? 0;
     prov[i] = o.provenanceId ?? null;
-    props[i] = o.props ? JSON.stringify(o.props) : null;
+    // Kinematics and detection inputs only. Identity lives in `entity`.
+    props[i] = slimProps(o.props as Record<string, unknown> | undefined);
   }
 
   await withRetry(() =>
@@ -672,20 +713,31 @@ export async function sourcesBackedOff(): Promise<Set<number>> {
  * thinning costs nothing analytically and buys an order of magnitude of
  * history on the same disk.
  */
-export async function runRetention(rawHours: number, trackHours: number) {
+export async function runRetention(
+  rawHours: number,
+  trackHours: number,
+  opts: { thinMinutes?: number; capBytes?: number } = {},
+) {
+  // 5-minute thinning was near-useless: at our poll rate each entity
+  // reports roughly every 3.5 minutes anyway, so it removed almost
+  // nothing. 30 minutes is coarse enough to actually reclaim space and
+  // still fine analytically, because a dead-vessel verdict only needs the
+  // fix either side of a gap.
+  const thinMinutes = opts.thinMinutes ?? 30;
+
   const thinned = await getPool().query(
     `WITH ranked AS (
        SELECT id,
               row_number() OVER (
-                PARTITION BY entity_id, date_trunc('hour', ts),
-                             floor(extract(minute from ts) / 5)
+                PARTITION BY entity_id,
+                             floor(extract(epoch from ts) / ($3::int * 60))
                 ORDER BY ts DESC) AS rn
          FROM observation
         WHERE ts <  now() - ($1 || ' hours')::interval
           AND ts >= now() - ($2 || ' hours')::interval)
      DELETE FROM observation o USING ranked r
       WHERE o.id = r.id AND r.rn > 1`,
-    [String(rawHours), String(trackHours)],
+    [String(rawHours), String(trackHours), thinMinutes],
   );
 
   const purged = await getPool().query(
@@ -698,7 +750,49 @@ export async function runRetention(rawHours: number, trackHours: number) {
     [String(trackHours)],
   );
 
-  return { thinned: thinned.rowCount ?? 0, purged: purged.rowCount ?? 0 };
+  /**
+   * Emergency trim.
+   *
+   * Time-based retention assumes you can predict volume. We could not:
+   * the first live run wrote 83 MB an hour against a 1 GB ceiling while
+   * configured to keep 48 hours, which is 4 GB. A full database is not a
+   * degraded system, it is a stopped one, and Postgres gives no warning.
+   *
+   * So retention also has a size backstop. Above the high-water mark it
+   * drops the oldest observations regardless of the time policy, in
+   * bounded batches, until it is back under. Losing the oldest history is
+   * strictly better than being unable to write the present.
+   */
+  let emergency = 0;
+  const capBytes = opts.capBytes ?? Number(process.env.DB_CAP_BYTES) ?? 0;
+  if (capBytes > 0) {
+    const highWater = capBytes * 0.85;
+    for (let pass = 0; pass < 20; pass++) {
+      const { rows } = await getPool().query<{ size: number }>(
+        `SELECT pg_database_size(current_database()) AS size`,
+      );
+      const size = Number(rows[0]?.size ?? 0);
+      if (size <= highWater) break;
+
+      const cut = await getPool().query(
+        `DELETE FROM observation
+          WHERE id IN (SELECT id FROM observation ORDER BY ts ASC LIMIT 50000)`,
+      );
+      emergency += cut.rowCount ?? 0;
+      if (!cut.rowCount) break;
+      // Space is only reclaimed for reuse after a vacuum.
+      await getPool().query('VACUUM (ANALYZE) observation').catch(() => {});
+    }
+    if (emergency > 0) {
+      console.warn(
+        `[retention] EMERGENCY TRIM: dropped ${emergency.toLocaleString()} oldest ` +
+          `observations to stay under ${(capBytes / 1e6).toFixed(0)} MB. ` +
+          `Lower RETAIN_RAW_H or move to a larger instance.`,
+      );
+    }
+  }
+
+  return { thinned: thinned.rowCount ?? 0, purged: purged.rowCount ?? 0, emergency };
 }
 
 export async function archiveStats() {

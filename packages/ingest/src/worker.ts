@@ -19,7 +19,7 @@ import { archiveStats, closePool, getPool } from '@deadreckon/store';
 import { Ingest, num } from './core.js';
 import { sleep } from './http.js';
 
-const POLL_AIR_S = num('POLL_AIR_S', 10);
+const POLL_AIR_S = num('POLL_AIR_S', 20);
 const POLL_GEO_S = num('POLL_GEO_S', 60);
 const POLL_THERMAL_S = num('POLL_THERMAL_S', 900);
 const POLL_ORBIT_S = num('POLL_ORBIT_S', 21600);

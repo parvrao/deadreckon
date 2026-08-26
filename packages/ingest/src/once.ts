@@ -59,7 +59,7 @@ async function main(): Promise<void> {
   await ing.pollThermal().catch((e) => console.error('[thermal]', (e as Error).message));
 
   // Air on its normal cadence for the length of the window.
-  const airEvery = num('POLL_AIR_S', 10) * 1000;
+  const airEvery = num('POLL_AIR_S', 20) * 1000;
   const deadline = started + RUN_SECONDS * 1000;
   let airPasses = 0;
 

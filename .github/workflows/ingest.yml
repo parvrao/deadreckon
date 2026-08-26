@@ -67,10 +67,10 @@ jobs:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
           RUN_SECONDS: ${{ github.event.inputs.run_seconds || '240' }}
-          POLL_AIR_S: '15'
+          POLL_AIR_S: '20'
           POLL_ORBIT_S: '21600'
-          RETAIN_RAW_H: '48'
-          RETAIN_TRACK_H: '720'
+          RETAIN_RAW_H: '12'
+          RETAIN_TRACK_H: '168'
           NODE_OPTIONS: '--max-old-space-size=3072'
         run: node packages/ingest/dist/once.js
 
