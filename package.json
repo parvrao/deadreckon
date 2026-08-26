@@ -1,0 +1,36 @@
+{
+  "name": "deadreckon",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Always-on open-source spatial intelligence. Detection, not decoration.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/store",
+    "packages/ingest",
+    "packages/engine",
+    "packages/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:server": "npm run build -w @deadreckon/core -w @deadreckon/store -w @deadreckon/engine -w @deadreckon/ingest -w @deadreckon/server",
+    "build:web": "npm run build -w @deadreckon/core && npm run build -w @deadreckon/web",
+    "typecheck": "tsc -b --pretty",
+    "dev:server": "npm run dev -w @deadreckon/server",
+    "dev:ingest": "npm run dev -w @deadreckon/ingest",
+    "dev:web": "npm run dev -w @deadreckon/web",
+    "start:server": "node packages/server/dist/index.js",
+    "start:ingest": "node packages/ingest/dist/worker.js",
+    "migrate": "node packages/store/dist/migrate.js",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

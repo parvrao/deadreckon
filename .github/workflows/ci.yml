@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # The tests are pure: geodesy, dead-reckoning verdicts, the binary
+      # codec, the hash chain, CONFLUENCE clustering. No database, no
+      # network, under a second. There is no excuse for skipping them.
+      - run: npm test
+
+      # esbuild does not typecheck, so the browser bundle gets its own pass.
+      - run: npx tsc --noEmit -p apps/web/tsconfig.json
