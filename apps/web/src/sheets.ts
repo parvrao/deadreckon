@@ -8,6 +8,124 @@
 
 import { getJson } from './net.js';
 
+/**
+ * The panel that should have existed from the first commit.
+ *
+ * The console opened onto a dark map with two buttons and no indication
+ * that it had a timeline, a detection engine, clickable evidence, or any
+ * capability at all. A tool that assumes you already know what it is gets
+ * closed before you find out.
+ */
+export function helpSheet(): string {
+  return `
+  <div class="cf-head">
+    <div>
+      <div class="k">WHAT THIS IS</div>
+      <h2>A tripwire for public data, not a live map.</h2>
+    </div>
+    <button class="x" id="sh-x">&times;</button>
+  </div>
+  <div class="cf-body">
+
+    <div class="sec">
+      <p class="prose">
+        Live OSINT maps show you what is out there right now. This one runs a
+        detection engine over the same public feeds and tells you when
+        something <b>changed</b> &mdash; a ship going dark and reappearing where
+        physics says it could not be, an air corridor emptying, a cluster of
+        aircraft losing GPS at once &mdash; and hands you the evidence chain
+        behind every claim.
+      </p>
+      <p class="prose" style="margin-top:11px">
+        Nothing here requires you to have been watching. The archive fills
+        continuously, so you can drag back to a moment nobody thought to record.
+      </p>
+    </div>
+
+    <div class="sec">
+      <h3>THE THREE SURFACES</h3>
+      <dl class="kv">
+        <dt>THE WALL</dt>
+        <dd>The map. Every contact currently reporting, coloured by domain.
+            Hover any dot for its identity, speed and heading.</dd>
+        <dt>THE TICKER</dt>
+        <dd>Right-hand column. What the engine noticed without being asked.
+            Click any row to open its Case File.</dd>
+        <dt>THE CASE FILE</dt>
+        <dd>Why the engine thinks so: the method, the exact HTTP responses it
+            rests on with their hashes, the target's track, and an explicit
+            list of what would have to be true for the finding to be wrong.</dd>
+      </dl>
+    </div>
+
+    <div class="sec">
+      <h3>THINGS YOU CAN DO</h3>
+      <dl class="kv">
+        <dt>Jump to a watchbox</dt>
+        <dd>The strip at the top left of the map. Ten chokepoints are actively
+            polled: Hormuz, Malacca, Bab-el-Mandeb, Suez, Bosphorus, Panama,
+            Taiwan Strait, Kerch, Gulf of Guinea, Danish Straits. Click a name
+            to fly there, or click the cyan box on the map itself.</dd>
+        <dt>Toggle layers</dt>
+        <dd>The legend at bottom left is a control, not a caption. Click any
+            row to add or remove that domain from the live feed.</dd>
+        <dt>Scrub time</dt>
+        <dd>The timeline along the bottom. Drag it, scroll on it, or use the
+            <b>-1h</b> and <b>-15m</b> buttons. <b>▶</b> replays forward at the
+            rate shown next to it. <b>● LIVE</b> returns to now.
+            There is deliberately no record button.</dd>
+        <dt>Filter detections</dt>
+        <dd>The rule chips above the ticker. Click to show only that rule.</dd>
+        <dt>Export evidence</dt>
+        <dd>Every Case File has a download that produces a self-contained JSON
+            bundle: the finding, every source record with its payload hash, the
+            method, the limitations, and a canonical hash of the bundle itself.</dd>
+        <dt>Audit the archive</dt>
+        <dd>SOURCES lists every feed and its licence.
+            <a href="/api/provenance/verify" style="color:var(--sea)">/api/provenance/verify</a>
+            recomputes the tamper-evident hash chain over everything ingested.</dd>
+      </dl>
+    </div>
+
+    <div class="sec">
+      <h3>WHAT THE ENGINE LOOKS FOR</h3>
+      <dl class="kv">
+        <dt>DARK_VESSEL</dt><dd>AIS goes quiet, then returns outside the envelope physics allows</dd>
+        <dt>SPOOF_DISCONTINUITY</dt><dd>Reappearance implies a speed above the hull class ceiling</dd>
+        <dt>AIRSPACE_VOID</dt><dd>Aircraft count collapses against this cell's own hour-of-week baseline</dd>
+        <dt>GNSS_BLOOM</dt><dd>A cluster of aircraft reporting degraded navigation integrity</dd>
+        <dt>RENDEZVOUS</dt><dd>Two merchant hulls alongside, sustained, away from any anchorage</dd>
+        <dt>LOITER</dt><dd>Long path, no progress. The ISR racetrack signature</dd>
+        <dt>SQUAWK_EMERGENCY</dt><dd>7500 hijack, 7600 radio failure, 7700 general emergency</dd>
+        <dt>THERMAL_ANOMALY</dt><dd>VIIRS hotspot above 40 MW radiative power</dd>
+        <dt>SEISMIC_SHALLOW</dt><dd>Magnitude 3.2+ at 6 km depth or less</dd>
+        <dt style="color:var(--alert)">CONFLUENCE</dt>
+        <dd style="color:var(--alert)">Two or more of the above agreeing in space and
+            time, from <i>different</i> sensing modalities. The one that matters.</dd>
+      </dl>
+    </div>
+
+    <div class="sec">
+      <h3>KEYS</h3>
+      <dl class="kv">
+        <dt>Space</dt><dd>play / pause replay</dd>
+        <dt>Esc</dt><dd>close any panel</dd>
+        <dt>Scroll on timeline</dt><dd>seek</dd>
+      </dl>
+    </div>
+
+    <div class="sec">
+      <h3>IF THE BOARD IS EMPTY</h3>
+      <ul class="caveat">
+        <li>That is often the correct answer. The engine only speaks when observations diverge from an explicit model, and most hours nothing does.</li>
+        <li>Only ten chokepoints are polled, not the whole planet. Scraping the entire sky would get us rate-limited off our own free data sources within the hour. Use the watchbox strip.</li>
+        <li>AIRSPACE_VOID needs roughly a week of samples before it has a baseline to compare against. A young deployment gets quieter, not louder.</li>
+        <li>Check SOURCES. A dead feed looks exactly like a quiet world, and that mistake turns a missing signal into a false detection.</li>
+      </ul>
+    </div>
+  </div>`;
+}
+
 export function architectureSheet(): string {
   void hydrateStats();
   return `

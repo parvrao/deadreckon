@@ -323,12 +323,13 @@ button {
 #legend,
 #viewinfo {
   position: absolute;
-  background: rgba(8, 13, 20, 0.92);
+  background: rgba(5, 9, 18, 0.94);
   border: 1px solid var(--hair);
   padding: 8px 10px;
   font-size: 10px;
   pointer-events: none;
   backdrop-filter: blur(3px);
+  z-index: 5;
 }
 #legend {
   left: 10px;
@@ -348,6 +349,20 @@ button {
   font-weight: 500;
 }
 
+#legend {
+  pointer-events: auto;
+}
+.lg-k {
+  font-size: 8px;
+  letter-spacing: 0.15em;
+  color: var(--txt-dim);
+  padding-bottom: 2px;
+}
+#legend hr {
+  border: none;
+  border-top: 1px solid var(--hair);
+  margin: 3px 0;
+}
 .lg {
   display: flex;
   align-items: center;
@@ -362,6 +377,29 @@ button {
 }
 .lg span {
   color: var(--txt);
+}
+
+/* The legend rows for each domain are toggles, not captions. */
+.lg.tog {
+  cursor: pointer;
+  padding: 1px 4px 1px 2px;
+  margin: 0 -4px 0 -2px;
+  opacity: 0.32;
+  transition: opacity 0.12s;
+  user-select: none;
+}
+.lg.tog:hover {
+  opacity: 0.7;
+}
+.lg.tog.on {
+  opacity: 1;
+}
+.lg.tog.on span {
+  color: var(--txt-hot);
+}
+.lg.tog:not(.on) i {
+  box-shadow: inset 0 0 0 1px currentColor;
+  background: transparent !important;
 }
 
 /* ------------------------------------------------------------ ticker */

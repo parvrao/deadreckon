@@ -19,7 +19,7 @@ import { Wall, sevColor, type DetectionPin, type WatchBox } from './wall.js';
 import { renderCaseFile, renderIncident } from './casefile.js';
 import { Scrubber } from './scrubber.js';
 import { startOrbits } from './orbits.js';
-import { architectureSheet, sourcesSheet } from './sheets.js';
+import { architectureSheet, sourcesSheet, helpSheet } from './sheets.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T =>
   document.querySelector(s) as T;
@@ -44,6 +44,7 @@ const state = {
   hoverContact: null as Contact | null,
   archiveFrom: 0,
   replayAt: null as number | null,
+  domains: new Set(['air', 'sea', 'geo', 'thermal', 'orbit']),
 };
 
 let wall: Wall;
@@ -110,7 +111,7 @@ function mount(watchboxes: WatchBox[]): void {
           maxLat: bounds.getNorth(),
           maxLon: bounds.getEast(),
         },
-        ['air', 'sea', 'geo', 'thermal'],
+        [...state.domains].filter((d) => d !== 'orbit'),
       );
       paintViewInfo(zoom);
     },
@@ -134,16 +135,7 @@ function mount(watchboxes: WatchBox[]): void {
   net.connect();
 
   // Subscribe to whatever is on screen at first paint.
-  const b = wall.map.getBounds();
-  net.subscribe(
-    {
-      minLat: b.getSouth(),
-      minLon: b.getWest(),
-      maxLat: b.getNorth(),
-      maxLon: b.getEast(),
-    },
-    ['air', 'sea', 'geo', 'thermal'],
-  );
+  resubscribe();
 
   scrubber = new Scrubber({
     canvas: $('#sc-canvas') as HTMLCanvasElement,
@@ -170,9 +162,26 @@ function mount(watchboxes: WatchBox[]): void {
   document.querySelectorAll('[data-panel]').forEach((el) =>
     el.addEventListener('click', () => {
       const which = (el as HTMLElement).dataset.panel;
-      openSheet(which === 'arch' ? architectureSheet() : sourcesSheet());
+      openSheet(
+        which === 'arch'
+          ? architectureSheet()
+          : which === 'sources'
+            ? sourcesSheet()
+            : helpSheet(),
+      );
     }),
   );
+
+  // First visit gets the explainer unprompted. A console that assumes you
+  // already know what it is will be closed before you find out.
+  try {
+    if (!localStorage.getItem('dr.seen')) {
+      localStorage.setItem('dr.seen', '1');
+      setTimeout(() => openSheet(helpSheet()), 600);
+    }
+  } catch {
+    /* private browsing; not worth failing over */
+  }
 
   buildFilters();
   paintLegend();
@@ -479,19 +488,69 @@ function buildWatchbar(boxes: WatchBox[]): void {
   );
 }
 
+/**
+ * The legend is also the domain control.
+ *
+ * It previously listed five colours and did nothing, which is a caption,
+ * not an interface. Making the rows toggle the live subscription turns
+ * the one piece of chrome that was already explaining the map into the
+ * place you steer it from, and costs no extra screen.
+ */
+const DOMAIN_ROWS: { key: string; color: string; label: string }[] = [
+  { key: 'air', color: '#FFA200', label: 'air' },
+  { key: 'sea', color: '#00D9FF', label: 'sea' },
+  { key: 'orbit', color: '#A78BFA', label: 'orbit' },
+  { key: 'geo', color: '#FF7A45', label: 'seismic' },
+  { key: 'thermal', color: '#FF4D4D', label: 'thermal' },
+];
+
 function paintLegend(): void {
-  const rows: [string, string][] = [
-    ['#FFA200', 'air'],
-    ['#00D9FF', 'sea'],
-    ['#A78BFA', 'orbit'],
-    ['#FF7A45', 'seismic'],
-    ['#FF4D4D', 'thermal'],
+  const toggles = DOMAIN_ROWS.map(
+    (d) =>
+      `<div class="lg tog ${state.domains.has(d.key) ? 'on' : ''}" data-d="${d.key}">
+         <i style="background:${d.color}"></i><span>${d.label}</span>
+       </div>`,
+  ).join('');
+
+  const statics = [
     ['#FFD666', 'GNSS degraded'],
     ['#788C9E', 'stale / dark'],
-  ];
-  $('#legend').innerHTML = rows
+  ]
     .map(([c, l]) => `<div class="lg"><i style="background:${c}"></i><span>${l}</span></div>`)
     .join('');
+
+  $('#legend').innerHTML =
+    `<div class="lg-k">LAYERS &middot; click to toggle</div>` + toggles + `<hr>` + statics;
+
+  $('#legend')
+    .querySelectorAll('.tog')
+    .forEach((n) =>
+      n.addEventListener('click', () => {
+        const d = (n as HTMLElement).dataset.d!;
+        if (state.domains.has(d)) {
+          // Never let the user switch everything off and conclude it broke.
+          if (state.domains.size > 1) state.domains.delete(d);
+        } else {
+          state.domains.add(d);
+        }
+        paintLegend();
+        resubscribe();
+      }),
+    );
+}
+
+function resubscribe(): void {
+  const b = wall.map.getBounds();
+  net.subscribe(
+    {
+      minLat: b.getSouth(),
+      minLon: b.getWest(),
+      maxLat: b.getNorth(),
+      maxLon: b.getEast(),
+    },
+    [...state.domains].filter((d) => d !== 'orbit'),
+  );
+  wall.setOrbitVisible(state.domains.has('orbit'));
 }
 
 function paintViewInfo(zoom?: number): void {

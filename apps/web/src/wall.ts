@@ -67,6 +67,7 @@ export class Wall {
   private cone: [number, number][] | null = null;
   private track: [number, number][] = [];
   private satellites: { lon: number; lat: number; name: string }[] = [];
+  private orbitVisible = true;
   private pulse = 0;
 
   constructor(
@@ -77,9 +78,15 @@ export class Wall {
   ) {
     this.map = new maplibregl.Map({
       container,
-      // CARTO's no-label dark basemap. Free, attributed, and quiet enough
-      // that the data is the brightest thing on screen.
-      style: 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json',
+      // CARTO dark-matter, WITH labels.
+      //
+      // The first version used the no-labels variant, on the theory that
+      // the data should be the brightest thing on screen. That theory was
+      // wrong. An unlabelled dark map is not restrained, it is illegible:
+      // you cannot tell Iran from Oman, you cannot find the Strait of
+      // Malacca, and you have no anchor for anything the console tells you.
+      // Orientation is not decoration.
+      style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
       center: [56.3, 26.5], // Strait of Hormuz
       zoom: 5.4,
       minZoom: 1.4,
@@ -120,26 +127,86 @@ export class Wall {
   }
 
   /**
-   * Push the basemap further back than the stock dark style does. Land
-   * becomes a faint plate and water becomes near-black, so an amber
-   * contact reads instantly against it.
+   * Retint the basemap for a dark console without destroying legibility.
+   *
+   * The previous version flattened every fill to one near-black and every
+   * line to one barely-visible grey, which erased coastlines, borders and
+   * the land/water distinction all at once. The map has to stay readable
+   * or nothing plotted on it means anything.
+   *
+   * Layers are treated by role rather than by type:
+   *   water        darkest, so contacts at sea read hottest
+   *   land         a visible plate, clearly not water
+   *   borders      brightest basemap element, for orientation
+   *   roads        suppressed, they are noise at this scale
+   *   place names  dim but readable, with a halo so they survive over data
    */
   private tintBasemap(): void {
     const style = this.map.getStyle();
-    for (const layer of style.layers ?? []) {
-      const id = layer.id;
+
+    const set = (id: string, prop: string, val: unknown): void => {
       try {
-        if (layer.type === 'background') {
-          this.map.setPaintProperty(id, 'background-color', '#04070B');
-        } else if (layer.type === 'fill') {
-          this.map.setPaintProperty(id, 'fill-color', '#0A1017');
-          this.map.setPaintProperty(id, 'fill-opacity', 0.85);
-        } else if (layer.type === 'line') {
-          this.map.setPaintProperty(id, 'line-color', '#16222E');
-          this.map.setPaintProperty(id, 'line-opacity', 0.55);
-        }
+        this.map.setPaintProperty(id, prop, val as never);
       } catch {
         /* not every layer accepts every property */
+      }
+    };
+
+    for (const layer of style.layers ?? []) {
+      const id = layer.id;
+      const isWater = /water|ocean|sea|river|lake|bathym/i.test(id);
+      const isBoundary = /boundary|border|admin/i.test(id);
+      const isRoad = /road|transport|bridge|tunnel|rail|aeroway|runway/i.test(id);
+      const isBuilding = /building/i.test(id);
+
+      switch (layer.type) {
+        case 'background':
+          set(id, 'background-color', '#050912');
+          break;
+
+        case 'fill':
+          if (isWater) {
+            set(id, 'fill-color', '#050A12');
+            set(id, 'fill-opacity', 1);
+          } else if (isBuilding) {
+            set(id, 'fill-opacity', 0);
+          } else {
+            // Land. Visibly lighter than water, which is the single most
+            // important contrast on a maritime console.
+            set(id, 'fill-color', '#111A24');
+            set(id, 'fill-opacity', 0.92);
+          }
+          break;
+
+        case 'line':
+          if (isBoundary) {
+            set(id, 'line-color', '#33506B');
+            set(id, 'line-opacity', 0.9);
+            set(id, 'line-width', 0.8);
+          } else if (isRoad) {
+            set(id, 'line-opacity', 0);
+          } else {
+            // Coastlines and waterways.
+            set(id, 'line-color', '#24384B');
+            set(id, 'line-opacity', 0.75);
+          }
+          break;
+
+        case 'symbol': {
+          // Place names. Dim enough not to compete with contacts, haloed
+          // enough to survive being drawn over. Countries and seas read
+          // brightest because those are the labels you navigate by.
+          const major = /country|continent|marine|ocean|sea|state/i.test(id);
+          set(id, 'text-color', major ? '#93AEC6' : '#5D748B');
+          set(id, 'text-halo-color', '#050912');
+          set(id, 'text-halo-width', 1.4);
+          set(id, 'text-halo-blur', 0.4);
+          set(id, 'icon-opacity', 0);
+          break;
+        }
+
+        default:
+          break;
       }
     }
   }
@@ -226,6 +293,11 @@ export class Wall {
   }
   setSatellites(s: { lon: number; lat: number; name: string }[]): void {
     this.satellites = s;
+    this.render();
+  }
+
+  setOrbitVisible(v: boolean): void {
+    this.orbitVisible = v;
     this.render();
   }
 
@@ -364,7 +436,8 @@ export class Wall {
             updateTriggers: { all: n },
           }),
 
-        this.satellites.length > 0 &&
+        this.orbitVisible &&
+          this.satellites.length > 0 &&
           new ScatterplotLayer<{ lon: number; lat: number; name: string }>({
             id: 'satellites',
             data: this.satellites,
