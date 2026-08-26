@@ -73,10 +73,36 @@ services:
       - key: VITE_WS_URL
         sync: false
     routes:
+      # SPA fallback, but NOT for hashed assets.
+      #
+      # A blanket /* -> /index.html rewrite turns every missing file into a
+      # 200 with an HTML body. When a browser holds a cached index.html
+      # pointing at a bundle hash that no longer exists, it requests that
+      # .js, gets HTML, and refuses to execute it:
+      #
+      #   Failed to load module script: non-JavaScript MIME type "text/html"
+      #
+      # The app then never boots, and every subsequent fix appears to do
+      # nothing because none of it is running. A missing asset must 404
+      # honestly so the failure names itself.
+      - type: rewrite
+        source: /assets/*
+        destination: /404-asset
       - type: rewrite
         source: /*
         destination: /index.html
+
     headers:
+      # index.html must never be cached. It is the one file that names the
+      # current bundle hashes, so a stale copy points at files that are gone.
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+      - path: /
+        name: Cache-Control
+        value: no-cache, no-store, must-revalidate
+      # Hashed assets are immutable by construction: a new build produces a
+      # new filename, so these can be cached forever.
       - path: /assets/*
         name: Cache-Control
         value: public, max-age=31536000, immutable
