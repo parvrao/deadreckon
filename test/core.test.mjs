@@ -11,6 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   geohashEncode,
@@ -383,4 +384,59 @@ test('severity is capped at 100 however much agrees', () => {
 test('clustering an empty or single-item set is safe', () => {
   assert.deepEqual(cluster([], 1000, 1000), []);
   assert.equal(cluster([det(1, 'LOITER', 40, 0, 1, 1)], 1000, 1000).length, 1);
+});
+
+/* --------------------------------------------- rendezvous class filter */
+
+/**
+ * Regression test for the worst bug this project has shipped.
+ *
+ * RENDEZVOUS went live claiming "sustained proximity ... away from a
+ * berth" while checking neither duration nor berth. It emitted 47
+ * detections in a single tick, all of them Swedish rescue launches,
+ * Norwegian pilot boats and Stockholm archipelago ferries at their jetties.
+ *
+ * The name filter is the crudest of the four gates and the easiest to
+ * break: tighten it slightly and it swallows real tankers, loosen it and
+ * the pilot boats come back. Both failure directions are tested, using
+ * the regex extracted from the BUILD rather than retyped here, so the
+ * test cannot silently drift away from the code it is guarding.
+ */
+test('rendezvous name filter excludes service craft without eating merchant hulls', () => {
+  const src = readFileSync(
+    new URL('../packages/engine/dist/rules.js', import.meta.url),
+    'utf8',
+  );
+  const m = src.match(/RZ_EXCLUDED_NAME\s*=\s*(\/.*\/[a-z]*);/);
+  assert.ok(m, 'RZ_EXCLUDED_NAME not found in build -- did the rule get renamed?');
+  const re = new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), 'i');
+
+  // Every one of these appeared in the live false-positive flood.
+  const mustExclude = [
+    'PILOT 221 SE', 'PILOT 742SE', 'PILOT BOAT', 'PILOT TRAVEMUENDE',
+    'RESCUE CECILIA BRATT', 'RESCUER', 'RESCUE HORN STAYER',
+    'KBV 304', 'KBV 050', 'F/V TALLONA', 'F/V KUNGSVIK', 'R/V SENSOR',
+    'VG 11 RANSKAR', 'VG55 INGAROE', 'VG350 ALTHEA',
+    'FN204 DANZIG', 'FN 484 SPIRHOLM', 'HV99 ANNI DORTHE', 'GG1206 DANO',
+    'KA09 KLINTS', 'R223 BUSTER', 'R177 DUEODDE', 'H77 FRIDA',
+    'O10 HYACINT', 'S10 CHRISTINA',
+    'SVITZER EMBLA', 'SVITZER GAIA', 'FAIRPLAY-20', 'FAIRPLAY-97',
+    'MULTRASALVOR 6',
+  ];
+  for (const n of mustExclude) {
+    assert.ok(re.test(n), `should have been excluded as service craft: ${n}`);
+  }
+
+  // Over-matching is the more dangerous failure: it makes the rule silent.
+  const mustKeep = [
+    'FRONT ALTAIR', 'EVER GIVEN', 'MAERSK DENVER', 'INTERASIA AMPLIFY',
+    'KOTA SURIA', 'BBC OPAL', 'NORDIC PEARL', 'SEYCHELLES PRELUDE',
+    'ALKA BULLSEYE', 'SOUND CASTOR', 'SOUND PROSPECTOR', 'NAVIGATOR AURORA',
+    'TERN FORS', 'OLAV TRYGGVASON', 'BALTIC TAUCHER II', 'DONG YANG NO.12',
+    'YU LIN NO.6', 'CMO SIM', 'ATALANTI', 'GROSHERZOGINELISABET',
+    'HARRY STONE', 'SC FALCON', 'ESTEMAR', 'TORLAND', '416005717',
+  ];
+  for (const n of mustKeep) {
+    assert.ok(!re.test(n), `merchant hull wrongly excluded: ${n}`);
+  }
 });

@@ -290,6 +290,36 @@ button {
   border: 1px solid rgba(154, 176, 194, 0.14);
 }
 
+/* Jump-to-watchbox strip. The map's answer to "why is it empty". */
+#watchbar {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: min(560px, 62%);
+  align-items: center;
+  z-index: 5;
+}
+#watchbar .wb-k {
+  font-size: 8.5px;
+  letter-spacing: 0.16em;
+  color: var(--sea);
+  padding: 4px 8px 4px 0;
+  white-space: nowrap;
+}
+#watchbar .btn {
+  padding: 4px 7px;
+  font-size: 8.5px;
+  background: rgba(8, 13, 20, 0.92);
+  backdrop-filter: blur(3px);
+}
+#watchbar .btn:hover {
+  color: var(--sea);
+  border-color: rgba(0, 217, 255, 0.45);
+}
+
 #legend,
 #viewinfo {
   position: absolute;

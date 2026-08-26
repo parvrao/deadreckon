@@ -116,6 +116,7 @@ function mount(watchboxes: WatchBox[]): void {
     },
   );
   wall.setWatchboxes(watchboxes);
+  buildWatchbar(watchboxes);
 
   net = new Net({
     onContacts: (contacts) => {
@@ -304,13 +305,28 @@ function paintTicker(): void {
   $('#tk-count').textContent = String(list.length);
 
   if (!list.length) {
+    const filtered = state.filters.size > 0 && state.detections.length > 0;
+    const noData = state.liveContacts === 0 && !state.connected;
     el.innerHTML =
-      '<div style="padding:26px 16px;color:var(--txt-dim);line-height:1.7;font-size:11px">' +
-      'No detections in the last 24 hours.<br><br>' +
-      'That is a valid result, not a failure. The engine only speaks when ' +
-      'observations diverge from an explicit model.<br><br>' +
-      'A fresh deployment also needs about a week of samples before the ' +
-      'AIRSPACE_VOID baseline can fire at all.' +
+      '<div style="padding:22px 16px;color:var(--txt-dim);line-height:1.7;font-size:11px">' +
+      (filtered
+        ? 'Nothing matches the active filters.<br><br>' +
+          `${state.detections.length} detections are hidden. Clear a filter above.`
+        : noData
+          ? '<span style="color:var(--alert)">Link is down.</span><br><br>' +
+            'The console cannot reach the API. Nothing here is trustworthy ' +
+            'until that reconnects.'
+          : 'No detections in the last 24 hours.<br><br>' +
+            'That is a valid result, not a failure. The engine only speaks when ' +
+            'observations diverge from an explicit model, and most hours nothing ' +
+            'does.<br><br>' +
+            'Two things stay quiet on a young deployment:<br>' +
+            '&middot; AIRSPACE_VOID needs about a week of samples before it has a ' +
+            'baseline to compare against.<br>' +
+            '&middot; DARK_VESSEL needs a hull to actually go dark and come back, ' +
+            'which takes hours.<br><br>' +
+            'The system watches ten chokepoints, not the whole planet. Use the ' +
+            'strip at the top left of the map to jump to one.') +
       '</div>';
     return;
   }
@@ -429,6 +445,38 @@ function paintReadout(note = ''): void {
     rd('sev 70+', String(high), high ? 'bad' : 'good') +
     rd('rx', fmtBytes(state.bytesIn)) +
     rd('mode', state.replayAt ? 'REPLAY' : 'LIVE', state.replayAt ? 'warn' : 'good');
+}
+
+/**
+ * Jump-to-watchbox strip.
+ *
+ * The ingest worker polls ten chokepoints, not the whole planet, because
+ * scraping the entire sky every ten seconds would get us rate-limited off
+ * our own data sources within the hour. That is a defensible engineering
+ * decision and a terrible first impression: zoomed out, the map looks
+ * broken rather than deliberate.
+ *
+ * So the console now says where it is looking, and lets you go there in
+ * one click. If a system does not tell you where its attention is, the
+ * reader assumes it has none.
+ */
+function buildWatchbar(boxes: WatchBox[]): void {
+  if (!boxes.length) return;
+  const bar = document.createElement('div');
+  bar.id = 'watchbar';
+  bar.innerHTML =
+    `<div class="wb-k">WATCHING ${boxes.length}</div>` +
+    boxes
+      .map((b, i) => `<button class="btn wb" data-i="${i}">${esc(b.label)}</button>`)
+      .join('');
+  $('#wall').append(bar);
+
+  bar.querySelectorAll('.wb').forEach((el) =>
+    el.addEventListener('click', () => {
+      const b = boxes[Number((el as HTMLElement).dataset.i)];
+      if (b) wall.fitBox(b);
+    }),
+  );
 }
 
 function paintLegend(): void {

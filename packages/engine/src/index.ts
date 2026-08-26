@@ -25,6 +25,37 @@ import { runConfluence } from './confluence.js';
 export * from './rules.js';
 export * from './confluence.js';
 
+/**
+ * Circuit breaker.
+ *
+ * On its first live run, RENDEZVOUS emitted 47 detections in a single
+ * tick, every one of them a Scandinavian ferry sitting at a jetty. The
+ * rule was wrong, but the deeper failure was that nothing stopped it. A
+ * board flooded with junk destroys the reader's trust in DARK_VESSEL and
+ * CONFLUENCE too, and those are the findings that matter.
+ *
+ * So: any rule producing more than this many detections in one tick is
+ * treated as malfunctioning rather than as unusually productive. We keep
+ * the strongest few for diagnosis, drop the rest, and say so loudly.
+ *
+ * The world does not produce forty ship-to-ship transfers in thirty
+ * seconds. If it ever genuinely does, the log will make that obvious and
+ * the number can be raised deliberately.
+ */
+const MAX_PER_RULE_PER_TICK: Record<string, number> = {
+  RENDEZVOUS: 6,
+  DARK_VESSEL: 12,
+  SPOOF_DISCONTINUITY: 12,
+  AIRSPACE_VOID: 8,
+  GNSS_BLOOM: 8,
+  LOITER: 10,
+  SQUAWK_EMERGENCY: 10,
+  THERMAL_ANOMALY: 15,
+  SEISMIC_SHALLOW: 15,
+  REACQUISITION: 20,
+};
+const DEFAULT_MAX_PER_RULE = 12;
+
 export interface EngineResult {
   detections: Detection[];
   newDetectionIds: number[];
@@ -32,11 +63,14 @@ export interface EngineResult {
   incidents: number;
   timings: Record<string, number>;
   errors: { rule: string; message: string }[];
+  /** Rules that tripped the breaker this tick, with how many they tried to emit. */
+  suppressed: { rule: string; produced: number; kept: number }[];
 }
 
 export async function runEngine(ctx: RuleCtx): Promise<EngineResult> {
   const timings: Record<string, number> = {};
   const errors: { rule: string; message: string }[] = [];
+  const suppressed: { rule: string; produced: number; kept: number }[] = [];
   const detections: Detection[] = [];
 
   const run = async (
@@ -45,7 +79,23 @@ export async function runEngine(ctx: RuleCtx): Promise<EngineResult> {
   ): Promise<void> => {
     const t0 = Date.now();
     try {
-      detections.push(...(await fn()));
+      const produced = await fn();
+      const cap = MAX_PER_RULE_PER_TICK[name] ?? DEFAULT_MAX_PER_RULE;
+
+      if (produced.length > cap) {
+        // Keep the highest-severity few so the flood is still diagnosable
+        // from the Case File rather than only from the logs.
+        const kept = [...produced].sort((a, b) => b.severity - a.severity).slice(0, cap);
+        suppressed.push({ rule: name, produced: produced.length, kept: kept.length });
+        console.warn(
+          `[engine] BREAKER: ${name} produced ${produced.length} detections in one ` +
+            `tick (cap ${cap}). Keeping the ${cap} highest-severity and dropping the ` +
+            `rest. A rule this productive is almost certainly malfunctioning.`,
+        );
+        detections.push(...kept);
+      } else {
+        detections.push(...produced);
+      }
     } catch (err) {
       errors.push({ rule: name, message: (err as Error).message });
       console.error(`[engine] ${name} threw:`, (err as Error).message);
@@ -99,5 +149,13 @@ export async function runEngine(ctx: RuleCtx): Promise<EngineResult> {
     errors.push({ rule: 'CONFLUENCE', message: (err as Error).message });
   }
 
-  return { detections, newDetectionIds, gapsOpened, incidents, timings, errors };
+  return {
+    detections,
+    newDetectionIds,
+    gapsOpened,
+    incidents,
+    timings,
+    errors,
+    suppressed,
+  };
 }

@@ -233,6 +233,21 @@ export class Wall {
     this.map.flyTo({ center: [lon, lat], zoom: zoom ?? Math.max(this.map.getZoom(), 6.5), duration: 900 });
   }
 
+  /** Frame a watchbox. The only places this system actually watches. */
+  fitBox(w: WatchBox): void {
+    this.map.fitBounds(
+      [
+        [w.min_lon, w.min_lat],
+        [w.max_lon, w.max_lat],
+      ],
+      { padding: 70, duration: 900, maxZoom: 9 },
+    );
+  }
+
+  get watchboxList(): WatchBox[] {
+    return this.watchboxes;
+  }
+
   /* ---------------------------------------------------------- render */
 
   private render(): void {
@@ -241,7 +256,10 @@ export class Wall {
 
     this.overlay.setProps({
       layers: [
-        // Watchboxes -- the areas where thresholds tighten.
+        // Watchboxes. These used to be a barely-visible hairline, which
+        // meant a zoomed-out map looked like an empty void rather than a
+        // system watching ten specific places on purpose. If the console
+        // does not say where it is looking, the reader assumes it is broken.
         new PolygonLayer<WatchBox>({
           id: 'watchboxes',
           data: this.watchboxes,
@@ -255,12 +273,36 @@ export class Wall {
             ],
           ],
           stroked: true,
-          filled: false,
-          getLineColor: [35, 55, 74, 200],
-          getLineWidth: 1,
+          filled: true,
+          getFillColor: [0, 217, 255, 14],
+          getLineColor: [0, 217, 255, 120],
+          getLineWidth: 1.4,
           lineWidthUnits: 'pixels',
-          pickable: false,
+          pickable: true,
+          onClick: (info) => {
+            const w = info.object as WatchBox | undefined;
+            if (!w) return false;
+            this.fitBox(w);
+            return true;
+          },
         }),
+
+        this.watchboxes.length > 0 &&
+          new TextLayer<WatchBox>({
+            id: 'watchbox-label',
+            data: this.watchboxes,
+            getPosition: (d) => [
+              (d.min_lon + d.max_lon) / 2,
+              (d.min_lat + d.max_lat) / 2,
+            ],
+            getText: (d) => d.label.toUpperCase(),
+            getSize: 9.5,
+            getColor: [0, 217, 255, 150],
+            fontFamily: "'JetBrains Mono', monospace",
+            characterSet: 'auto',
+            getPixelOffset: [0, -4],
+            pickable: false,
+          }),
 
         // The reachable set. The verdict, drawn.
         this.cone &&

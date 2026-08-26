@@ -27,7 +27,8 @@
     "start:server": "node packages/server/dist/index.js",
     "start:ingest": "node packages/ingest/dist/worker.js",
     "migrate": "node packages/store/dist/migrate.js",
-    "test": "node --test \"test/*.test.mjs\""
+    "test": "node --test \"test/*.test.mjs\"",
+    "start:ingest:local": "node --env-file=.env packages/ingest/dist/worker.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

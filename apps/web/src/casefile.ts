@@ -39,8 +39,10 @@ const LIMITS: Record<string, string[]> = {
     'Neither the source nor the type of interference is determined.',
   ],
   RENDEZVOUS: [
-    'Anchorages, pilot boarding areas and fishing grounds produce the same signature.',
     'Proximity is computed from reported positions, which may themselves be false.',
+    'The anchorage filter is a density heuristic, not a port dataset. A quiet berth with fewer than six stopped hulls can still slip through.',
+    'Vessel class comes from AIS static data, which is frequently absent or wrong. A mislabelled workboat can pass the class gate.',
+    'Two hulls alongside is not evidence of a transfer, only of the conditions under which one is possible.',
   ],
   LOITER: [
     'Holding patterns near congested airports look the same.',

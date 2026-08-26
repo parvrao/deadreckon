@@ -310,6 +310,12 @@ async function engineTick(): Promise<void> {
       if (d.id) console.log(`         [${d.severity}] ${d.rule}: ${d.title}`);
     }
   }
+  for (const s of result.suppressed) {
+    console.warn(
+      `[engine] BREAKER TRIPPED: ${s.rule} tried to emit ${s.produced}, kept ${s.kept}. ` +
+        `Investigate the rule rather than raising the cap.`,
+    );
+  }
   for (const e of result.errors) console.error(`[engine] ${e.rule}: ${e.message}`);
 
   await learnBaselines(batch);

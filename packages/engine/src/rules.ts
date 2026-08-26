@@ -461,81 +461,264 @@ export function ruleSquawk(ctx: RuleCtx): Detection[] {
 /* =================================================================== */
 
 /**
- * Two hulls, close together, both essentially stopped, for long enough
- * that it is not a passing. On open water that is a ship-to-ship transfer:
- * the standard mechanism for moving sanctioned cargo into a clean hull.
+ * Two hulls alongside at sea, for long enough that it is not a passing,
+ * somewhere neither of them has any business being moored. On open water
+ * that is a ship-to-ship transfer: the standard mechanism for moving
+ * sanctioned cargo into a clean hull.
  *
- * Deliberately excluded: anything slow-moving near a port. The point is to
- * find transfers where no transfer should be happening.
+ * THE FIRST VERSION OF THIS RULE WAS WRONG, and every gate below exists
+ * because of how it was wrong. It tested a single instant and then wrote
+ * "sustained proximity" into the summary, which is a claim the algorithm
+ * had never checked. On its first live run it fired 28 times in one tick
+ * on Swedish rescue launches, Norwegian pilot boats and container ships
+ * sitting at berth in Singapore.
+ *
+ * A rule that cries wolf 28 times per tick does not merely add noise. It
+ * destroys the reader's trust in DARK_VESSEL and CONFLUENCE too, which
+ * are the findings that actually matter. Four gates now, cheapest first:
+ *
+ *   1. CLASS      pilot, tug, rescue, fishing, pleasure, passenger and
+ *                 high-speed craft do not conduct cargo transfers
+ *   2. HARBOUR    a 5 km cell holding many stopped hulls is an anchorage,
+ *                 not a meeting. Costs nothing and needs no port dataset
+ *   3. UNDERWAY   both hulls must have actually travelled recently; a
+ *                 permanently moored boat is not meeting anyone
+ *   4. SUSTAINED  they must ALSO have been together N minutes ago
+ *
+ * Gate 4 is the one that makes the summary sentence true.
  */
-export function ruleRendezvous(ctx: RuleCtx): Detection[] {
-  const vessels = ctx.batch.filter(
-    (o) => o.domain === Domain.SEA && (o.sogKt ?? 99) < 1.2,
+const RZ = {
+  minSepM: 25,
+  maxSepM: 400,
+  maxSogKt: 1.2,
+  /** How far back proximity must also have held. */
+  sustainMs: 25 * 60_000,
+  /** Allowance for drift and AIS jitter over that window. */
+  sustainToleranceM: 900,
+  /** Stopped hulls in one 5 km cell above which we call it an anchorage. */
+  harbourStoppedPerCell: 6,
+  /** Distance a hull must have covered to count as underway rather than moored. */
+  underwayMinM: 3000,
+  underwayWindowMs: 6 * 3600_000,
+  /** Hard cap on history queries per tick. */
+  maxPairsToVerify: 40,
+} as const;
+
+/** Classes that are alongside each other all day long, entirely innocently. */
+const RZ_EXCLUDED_KIND =
+  /pilot|tug|rescue|fishing|pleasure|sailing|high speed|special|passenger|dredg|law enforce|port tender|sar/i;
+
+/**
+ * Name-based fallback for when AIS static data is absent or wrong, which
+ * is most of the time. Every pattern here was taken from a real false
+ * positive on the first live run.
+ */
+const RZ_EXCLUDED_NAME =
+  /^(pilot|rescue|f\/v|fv |kbv |sar |tug |rv |r\/v )|^(vg|fn|hv|gg|ka|s\d|h\d|o\d|r\d)[\s-]?\d|\bpilot\b|\brescue\b|svitzer|fairplay|multrasalvor|\bferry\b|\btug\b/i;
+
+interface TrackPoint {
+  ts: number;
+  lat: number;
+  lon: number;
+  sog: number | null;
+  cog: number | null;
+}
+
+export async function ruleRendezvous(ctx: RuleCtx): Promise<Detection[]> {
+  const stopped = ctx.batch.filter(
+    (o) => o.domain === Domain.SEA && (o.sogKt ?? 99) < RZ.maxSogKt,
   );
-  if (vessels.length < 2) return [];
+  if (stopped.length < 2) return [];
 
   // Grid-bucket to avoid an O(n^2) sweep over every stopped hull on earth.
   const grid = new Map<string, Observation[]>();
-  for (const v of vessels) {
+  for (const v of stopped) {
     const c = geohashEncode(v.lat, v.lon, 5);
-    (grid.get(c) ?? grid.set(c, []).get(c)!).push(v);
+    const list = grid.get(c);
+    if (list) list.push(v);
+    else grid.set(c, [v]);
   }
 
-  const out: Detection[] = [];
+  // ---- gates 1 and 2, free ----------------------------------------
+  const candidates: { a: Observation; b: Observation; sepM: number; cell: string }[] = [];
   const paired = new Set<string>();
 
-  for (const [, group] of grid) {
+  for (const [cell, group] of grid) {
+    // GATE 2. Six hulls stopped inside 5 km is a port, an anchorage or a
+    // fishing ground. Whatever it is, it is not two ships meeting.
+    if (group.length >= RZ.harbourStoppedPerCell) continue;
+
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
         const a = group[i]!;
         const b = group[j]!;
+
+        // GATE 1. Class, by AIS type where present, and by name where the
+        // type is missing or wrong. Name matching is crude, but a hull
+        // literally called "PILOT 221 SE" is a pilot boat whatever its
+        // static data claims, and bad static data is the norm in AIS.
+        const ka = ((a.props?.kind as string) ?? '').toLowerCase();
+        const kb = ((b.props?.kind as string) ?? '').toLowerCase();
+        const na = ((a.props?.label as string) ?? '').toLowerCase();
+        const nb = ((b.props?.label as string) ?? '').toLowerCase();
+        if (RZ_EXCLUDED_KIND.test(ka) || RZ_EXCLUDED_KIND.test(kb)) continue;
+        if (RZ_EXCLUDED_NAME.test(na) || RZ_EXCLUDED_NAME.test(nb)) continue;
+
+        // Duplicate MMSI broadcasts and mis-keyed static data produce
+        // "VALENCE and VALENCE alongside at sea". That is one hull.
+        if (na && na === nb) continue;
+
+        const sepM = haversineM(a.lat, a.lon, b.lat, b.lon);
+        if (sepM > RZ.maxSepM || sepM < RZ.minSepM) continue;
+
         const key = [a.entityId, b.entityId].sort().join('|');
         if (paired.has(key)) continue;
-
-        const d = haversineM(a.lat, a.lon, b.lat, b.lon);
-        if (d > 500 || d < 5) continue;
-
-        const box = boxFor(a.lat, a.lon, ctx.watchboxes);
-        const la = (a.props?.label as string) ?? a.entityId;
-        const lb = (b.props?.label as string) ?? b.entityId;
-        const ka = (a.props?.kind as string) ?? 'unknown';
-        const kb = (b.props?.kind as string) ?? 'unknown';
-        const bothTankers = ka.includes('tanker') && kb.includes('tanker');
-
         paired.add(key);
-        out.push(
-          mk({
-            rule: 'RENDEZVOUS',
-            severity: Math.min(
-              100,
-              Math.round(40 + (bothTankers ? 25 : 0) + (box ? 12 : 0) + (500 - d) / 25),
-            ),
-            tsStart: quantize(Math.min(a.ts, b.ts), 30 * 60_000),
-            tsEnd: null,
-            lat: (a.lat + b.lat) / 2,
-            lon: (a.lon + b.lon) / 2,
-            entityIds: [a.entityId, b.entityId],
-            title: `${la} and ${lb} alongside at sea${bothTankers ? ' (tanker/tanker)' : ''}`,
-            summary:
-              `Two vessels ${Math.round(d)} m apart, both under 1.2 kt` +
-              `${box ? `, in ${box.label}` : ''}. Sustained proximity at near-zero ` +
-              `speed away from a berth is the ship-to-ship transfer signature.`,
-            evidence: {
-              separationM: Math.round(d),
-              vessels: [
-                { id: a.entityId, label: la, kind: ka, sogKt: a.sogKt, mmsi: a.props?.mmsi },
-                { id: b.entityId, label: lb, kind: kb, sogKt: b.sogKt, mmsi: b.props?.mmsi },
-              ],
-              bothTankers,
-              watchbox: box?.key ?? null,
-            },
-            provenanceIds: ctx.provenanceIds.slice(0, 4),
-          }),
-        );
+        candidates.push({ a, b, sepM, cell });
       }
     }
   }
+  if (!candidates.length) return [];
+
+  // Closest pairs are the most likely to be real, so if we have to spend a
+  // bounded number of history queries, spend them there.
+  candidates.sort((x, y) => x.sepM - y.sepM);
+  const verify = candidates.slice(0, RZ.maxPairsToVerify);
+
+  // ---- gates 3 and 4, one history query per hull ------------------
+  const trackCache = new Map<string, TrackPoint[]>();
+  const trackOf = async (id: string): Promise<TrackPoint[]> => {
+    const hit = trackCache.get(id);
+    if (hit) return hit;
+    const t = (await trackFor(
+      id,
+      ctx.now - RZ.underwayWindowMs,
+      ctx.now,
+      600,
+    )) as TrackPoint[];
+    trackCache.set(id, t);
+    return t;
+  };
+
+  const out: Detection[] = [];
+
+  for (const { a, b, sepM } of verify) {
+    const [ta, tb] = await Promise.all([trackOf(a.entityId), trackOf(b.entityId)]);
+
+    // Without history we cannot substantiate the claim, so we do not make it.
+    if (ta.length < 4 || tb.length < 4) continue;
+
+    // GATE 3. At least one of them has to have arrived from somewhere.
+    const movedA = pathLengthM(ta);
+    const movedB = pathLengthM(tb);
+    if (movedA < RZ.underwayMinM && movedB < RZ.underwayMinM) continue;
+
+    // GATE 4. Were they also together then?
+    const thenTs = ctx.now - RZ.sustainMs;
+    const pa = positionAt(ta, thenTs);
+    const pb = positionAt(tb, thenTs);
+    if (!pa || !pb) continue;
+    const thenSepM = haversineM(pa.lat, pa.lon, pb.lat, pb.lon);
+    if (thenSepM > RZ.sustainToleranceM) continue;
+
+    const heldMin = Math.round((ctx.now - Math.max(pa.ts, pb.ts)) / 60_000);
+    const box = boxFor(a.lat, a.lon, ctx.watchboxes);
+    const la = (a.props?.label as string) ?? a.entityId;
+    const lb = (b.props?.label as string) ?? b.entityId;
+    const ka = ((a.props?.kind as string) ?? 'unknown').toLowerCase();
+    const kb = ((b.props?.kind as string) ?? 'unknown').toLowerCase();
+    const isBulk = (k: string): boolean => /tanker|cargo|bulk/.test(k);
+    const bothTankers = ka.includes('tanker') && kb.includes('tanker');
+    const bothBulk = isBulk(ka) && isBulk(kb);
+
+    const severity = Math.min(
+      100,
+      Math.round(
+        28 +
+          (bothTankers ? 30 : bothBulk ? 18 : 0) +
+          (box ? 10 : 0) +
+          Math.min(14, (RZ.maxSepM - sepM) / 28) +
+          Math.min(14, heldMin / 6),
+      ),
+    );
+    if (severity < 45) continue;
+
+    out.push(
+      mk({
+        rule: 'RENDEZVOUS',
+        severity,
+        tsStart: quantize(Math.max(pa.ts, pb.ts), 30 * 60_000),
+        tsEnd: null,
+        lat: (a.lat + b.lat) / 2,
+        lon: (a.lon + b.lon) / 2,
+        entityIds: [a.entityId, b.entityId],
+        title: `${la} and ${lb} alongside at sea${bothTankers ? ' (tanker/tanker)' : ''}`,
+        summary:
+          `Two vessels ${Math.round(sepM)} m apart, both under ${RZ.maxSogKt} kt, ` +
+          `and still within ${Math.round(thenSepM)} m of each other ${heldMin} minutes ` +
+          `ago${box ? `, in ${box.label}` : ''}. ` +
+          `${movedA > RZ.underwayMinM && movedB > RZ.underwayMinM ? 'Both hulls' : 'One hull'} ` +
+          `was underway earlier, and no anchorage-density signature is present in this cell. ` +
+          `That is the ship-to-ship transfer profile.`,
+        evidence: {
+          separationM: Math.round(sepM),
+          separationAtCheckpointM: Math.round(thenSepM),
+          sustainedForMin: heldMin,
+          checkpointTs: thenTs,
+          vessels: [
+            {
+              id: a.entityId,
+              label: la,
+              kind: ka,
+              sogKt: a.sogKt,
+              mmsi: a.props?.mmsi ?? null,
+              travelled6hNm: +(movedA / 1852).toFixed(1),
+              fixes: ta.length,
+            },
+            {
+              id: b.entityId,
+              label: lb,
+              kind: kb,
+              sogKt: b.sogKt,
+              mmsi: b.props?.mmsi ?? null,
+              travelled6hNm: +(movedB / 1852).toFixed(1),
+              fixes: tb.length,
+            },
+          ],
+          bothTankers,
+          bothBulkClass: bothBulk,
+          watchbox: box?.key ?? null,
+          gatesPassed: ['class', 'not-anchorage', 'underway', 'sustained'],
+          thresholds: RZ,
+        },
+        provenanceIds: ctx.provenanceIds.slice(0, 4),
+      }),
+    );
+  }
   return out;
+}
+
+/** Total distance actually covered along a track. */
+function pathLengthM(t: readonly TrackPoint[]): number {
+  let m = 0;
+  for (let i = 1; i < t.length; i++) {
+    m += haversineM(t[i - 1]!.lat, t[i - 1]!.lon, t[i]!.lat, t[i]!.lon);
+  }
+  return m;
+}
+
+/**
+ * Last fix at or before `ts`. Returns null when the track does not reach
+ * back that far, which correctly prevents the rule from asserting a
+ * duration it has no evidence for.
+ */
+function positionAt(t: readonly TrackPoint[], ts: number): TrackPoint | null {
+  let best: TrackPoint | null = null;
+  for (const p of t) {
+    if (p.ts <= ts) best = p;
+    else break;
+  }
+  return best;
 }
 
 /* =================================================================== */
