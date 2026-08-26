@@ -24,6 +24,7 @@ import { startOrbits } from './orbits.js';
 import { architectureSheet, sourcesSheet, helpSheet } from './sheets.js';
 import { Panel, type TabId } from './panel.js';
 import { BASE_LAYERS } from './gibs.js';
+import { loadCameras, frameUrl, CAMERA_SOURCES, type Camera } from './cameras.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T =>
   document.querySelector(s) as T;
@@ -49,6 +50,7 @@ const state = {
   archiveFrom: 0,
   replayAt: null as number | null,
   domains: new Set(['air', 'sea', 'geo', 'thermal', 'orbit']),
+  cameras: [] as Camera[],
 };
 
 let wall: Wall;
@@ -121,6 +123,7 @@ function mount(watchboxes: WatchBox[]): void {
       paintViewInfo(zoom);
     },
     (id) => panel?.markFailing(id),
+    (c) => openCamera(c),
   );
   wall.setWatchboxes(watchboxes);
 
@@ -161,6 +164,13 @@ function mount(watchboxes: WatchBox[]): void {
     onOverlay: (l, on) => wall.setOverlay(l, on),
     onOverlayOpacity: (id, v) => wall.setOverlayOpacity(id, v),
     onDomain: (d, on) => {
+      if (d === 'camera') {
+        // Cameras are fetched by the browser and never stored, so they are
+        // not a subscription domain. Load on first enable.
+        if (on && !state.cameras.length) void loadCameraLayer();
+        else wall.setCameras(state.cameras, on);
+        return;
+      }
       if (on) state.domains.add(d);
       else state.domains.delete(d);
       resubscribe();
@@ -243,6 +253,78 @@ function mount(watchboxes: WatchBox[]): void {
     if (n >= 1 && n <= 5) panel.open(tabs[n - 1]!);
     if (e.key === 'g' || e.key === 'G') $('#proj-toggle').click();
   });
+}
+
+/* ------------------------------------------------------------- cameras */
+
+/**
+ * Public infrastructure cameras. Fetched in the browser, never stored.
+ *
+ * The rest of the system records everything so nobody has to press record.
+ * Cameras are the one input where that instinct is wrong: an archive of
+ * street imagery is a different kind of object from an archive of AIS
+ * positions. So no camera frame touches the database.
+ */
+async function loadCameraLayer(): Promise<void> {
+  const { cameras, errors } = await loadCameras();
+  state.cameras = cameras;
+  wall.setCameras(cameras, true);
+  for (const e of errors) console.warn(`[cameras] ${e.source}: ${e.message}`);
+  if (!cameras.length) {
+    console.warn('[cameras] no source answered');
+  }
+}
+
+/** Live still, refreshed on the operator's own cadence. Nothing retained. */
+function openCamera(c: Camera): void {
+  const src = CAMERA_SOURCES.find((s) => s.id === c.source);
+  const el = $('#casefile');
+  el.hidden = false;
+  el.innerHTML = `
+    <div class="cf-head">
+      <div>
+        <div class="k">CAMERA &middot; ${esc(src?.authority ?? c.source)}</div>
+        <h2>${esc(c.label)}</h2>
+      </div>
+      <button class="x" id="cf-x">&times;</button>
+    </div>
+    <div class="cf-body">
+      <img id="cam-frame" src="${esc(frameUrl(c))}" alt="${esc(c.label)}"
+           style="width:100%;border:1px solid var(--hair);background:var(--void)">
+      <div class="sec">
+        <dl class="kv">
+          <dt>position</dt><dd>${c.lat.toFixed(5)}, ${c.lon.toFixed(5)}</dd>
+          <dt>operator</dt><dd>${esc(src?.authority ?? '?')}</dd>
+          <dt>refresh</dt><dd>every ${src?.refreshS ?? 60}s, per the operator</dd>
+          <dt>retained</dt><dd style="color:var(--ok)">nothing. This frame is not stored.</dd>
+        </dl>
+      </div>
+      <div class="sec">
+        <h3>LICENCE</h3>
+        <p class="caveat">${esc(src?.licence ?? '')}</p>
+      </div>
+      <div class="sec">
+        <h3>WHY THIS IS HERE</h3>
+        <ul class="caveat">
+          <li>Corroboration. A detection with a camera looking at it is a
+              detection you can check with your eyes.</li>
+          <li>Roads, ports, canals and waterways only. Infrastructure, where
+              the subject is a junction or a lock gate.</li>
+          <li>No frame is written to the archive, so there is nothing here to
+              search later. That is deliberate.</li>
+        </ul>
+      </div>
+    </div>`;
+  el.querySelector('#cf-x')?.addEventListener('click', closeCase);
+
+  const img = el.querySelector('#cam-frame') as HTMLImageElement | null;
+  const iv = window.setInterval(() => {
+    if (!document.body.contains(img)) {
+      window.clearInterval(iv);
+      return;
+    }
+    if (img) img.src = frameUrl(c);
+  }, (src?.refreshS ?? 60) * 1000);
 }
 
 /* ---------------------------------------------------------- detections */
@@ -420,7 +502,15 @@ async function openCase(id: number): Promise<void> {
   try {
     const data = await getJson<Record<string, unknown>>(`/api/detections/${id}`);
     el.innerHTML = renderCaseFile(data);
-    wireCaseFile(el, data);
+    // Drawing the evidence on the map is separate from loading it. A
+    // renderer failure previously replaced the whole Case File with
+    // "could not load", hiding evidence that had arrived perfectly well.
+    try {
+      wireCaseFile(el, data);
+    } catch (err) {
+      console.error('[case] overlay draw failed:', (err as Error).message);
+      el.querySelector('#cf-x')?.addEventListener('click', closeCase);
+    }
   } catch (err) {
     el.innerHTML =
       `<div class="cf-head"><div><div class="k">CASE FILE</div>` +

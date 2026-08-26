@@ -50,6 +50,7 @@ const TABS: { id: TabId; icon: string; label: string }[] = [
 ];
 
 export const DOMAIN_ROWS = [
+  { key: 'camera', color: '#8CDCFF', label: 'cameras' },
   { key: 'air', color: '#FFA200', label: 'aircraft' },
   { key: 'sea', color: '#00D9FF', label: 'vessels' },
   { key: 'orbit', color: '#A78BFA', label: 'satellites' },
@@ -62,7 +63,7 @@ export class Panel {
   private collapsed = false;
   private base = 'bluemarble';
   private overlays = new Set<string>();
-  private domains = new Set(['air', 'sea', 'orbit', 'geo', 'thermal']);
+  private domains = new Set(['air', 'sea', 'orbit', 'geo', 'thermal']); // 'camera' opt-in
   private failing = new Set<string>();
   private watchboxes: WatchBox[] = [];
 

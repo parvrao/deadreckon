@@ -53,18 +53,28 @@ const ATTRIB_VECTOR =
 export type Projection = 'globe' | 'flat';
 
 /**
- * `vertical-perspective`, not `globe`.
+ * `globe`, not `vertical-perspective`.
  *
- * MapLibre's `globe` is a preset that interpolates to flat Mercator
- * between z10 and z12. That is a sensible default for a general map and
- * exactly wrong here: zooming into a chokepoint should not silently
- * unwrap the planet.
+ * I originally chose `vertical-perspective` because MapLibre's `globe` is
+ * a preset that interpolates to flat Mercator between z10 and z12, and
+ * unwrapping the planet as you zoom into a chokepoint felt wrong.
+ *
+ * deck.gl disagrees, loudly. Its MapLibre integration recognises `globe`
+ * and throws `Unsupported projection` on `vertical-perspective`, which
+ * means EVERY deck layer fails: no contacts, no reachable-set cone, no
+ * track, and the Case File dies while rendering. The data was arriving
+ * the whole time -- 1,805 entities in the shared snapshot -- and nothing
+ * could be drawn.
+ *
+ * A globe that flattens above z12 is a cosmetic compromise. A globe that
+ * cannot render a single contact is not a globe, it is wallpaper. So:
+ * `globe`, and the flattening is the price.
  */
 export function buildStyle(projection: Projection): StyleSpecification {
   return {
     version: 8,
     projection: {
-      type: projection === 'globe' ? 'vertical-perspective' : 'mercator',
+      type: projection === 'globe' ? 'globe' : 'mercator',
     },
     glyphs: GLYPHS,
     sources: {

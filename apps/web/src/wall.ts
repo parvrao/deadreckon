@@ -42,6 +42,7 @@ import { ObsFlag } from '@deadreckon/core';
 import type { Contact } from './net.js';
 import { buildStyle, watchboxGeoJSON, type Projection, type WatchBox } from './basemap.js';
 import { GIBS_ATTRIBUTION, tileUrls, type GibsLayer } from './gibs.js';
+import { frameUrl, type Camera } from './cameras.js';
 
 export type { WatchBox };
 
@@ -92,6 +93,8 @@ export class Wall {
   private pendingBase: { l: GibsLayer; date?: string } | null = null;
   /** Layer ids whose tiles are 404ing or erroring. */
   private tileErrors = new Set<string>();
+  private cameras: Camera[] = [];
+  private camerasVisible = false;
 
   constructor(
     container: string,
@@ -99,6 +102,7 @@ export class Wall {
     private readonly onDetectionPick: (d: DetectionPin) => void,
     private readonly onMove: (b: LngLatBounds, zoom: number) => void,
     private readonly onLayerError?: (id: string) => void,
+    private readonly onCameraPick?: (c: Camera) => void,
   ) {
     this.map = new MapLibreMap({
       container,
@@ -184,6 +188,20 @@ export class Wall {
       }
     });
 
+    // The panel collapsing changes this container's width, and MapLibre
+    // only re-reads its canvas size when told to. Without this the canvas
+    // keeps its old dimensions and the globe renders into a rectangle
+    // smaller than the space it occupies -- which looks exactly like a
+    // broken projection.
+    const el = document.getElementById(container);
+    if (el && 'ResizeObserver' in window) {
+      let rt: number | undefined;
+      new ResizeObserver(() => {
+        window.clearTimeout(rt);
+        rt = window.setTimeout(() => this.map.resize(), 80);
+      }).observe(el);
+    }
+
     // 8 fps is enough for a pulse and costs almost nothing.
     setInterval(() => {
       this.pulse = (this.pulse + 1) % 32;
@@ -205,8 +223,10 @@ export class Wall {
     if (p === this.projection) return;
     this.projection = p;
     try {
+      // `globe`, not `vertical-perspective`. deck.gl throws
+      // "Unsupported projection" on the latter. See basemap.ts.
       this.map.setProjection({
-        type: p === 'globe' ? 'vertical-perspective' : 'mercator',
+        type: p === 'globe' ? 'globe' : 'mercator',
       } as never);
     } catch {
       // Older MapLibre without globe support. Rebuild the style instead of
@@ -423,6 +443,12 @@ export class Wall {
     this.render();
   }
 
+  setCameras(list: Camera[], visible: boolean): void {
+    this.cameras = list;
+    this.camerasVisible = visible;
+    this.render();
+  }
+
   flyTo(lon: number, lat: number, zoom?: number): void {
     this.map.flyTo({ center: [lon, lat], zoom: zoom ?? Math.max(this.map.getZoom(), 6.5), duration: 900 });
   }
@@ -445,6 +471,18 @@ export class Wall {
   /* ---------------------------------------------------------- render */
 
   private render(): void {
+    try {
+      this.renderLayers();
+    } catch (err) {
+      // A deck.gl failure used to propagate into openCase() and surface as
+      // "could not load / Unsupported projection" in the Case File, which
+      // pointed the reader at the evidence loader rather than at the
+      // renderer. Contain it and name it where it happened.
+      console.error('[wall] layer render failed:', (err as Error).message);
+    }
+  }
+
+  private renderLayers(): void {
     const n = this.contacts.length;
     const phase = Math.sin((this.pulse / 32) * Math.PI * 2) * 0.5 + 0.5;
 
@@ -559,6 +597,29 @@ export class Wall {
             pickable: true,
             onClick: (info) => {
               if (info.object) this.onDetectionPick(info.object as DetectionPin);
+              return true;
+            },
+          }),
+
+        this.camerasVisible &&
+          this.cameras.length > 0 &&
+          new ScatterplotLayer<Camera>({
+            id: 'cameras',
+            data: this.cameras,
+            getPosition: (d) => [d.lon, d.lat],
+            getRadius: 3,
+            radiusUnits: 'pixels',
+            radiusMinPixels: 2.5,
+            radiusMaxPixels: 6,
+            stroked: true,
+            filled: true,
+            getFillColor: [140, 220, 255, 210],
+            getLineColor: [8, 13, 20, 200],
+            getLineWidth: 1,
+            lineWidthUnits: 'pixels',
+            pickable: true,
+            onClick: (info) => {
+              if (info.object) this.onCameraPick?.(info.object as Camera);
               return true;
             },
           }),
