@@ -151,6 +151,14 @@ function mount(watchboxes: WatchBox[]): void {
   });
   scrubber.setWindow(state.archiveFrom, Date.now());
 
+  $('#proj-toggle').addEventListener('click', () => {
+    const next = wall.currentProjection === 'globe' ? 'flat' : 'globe';
+    wall.setProjection(next);
+    const b = $('#proj-toggle');
+    b.textContent = next === 'globe' ? '◍ GLOBE' : '▦ FLAT';
+    b.classList.toggle('on', next === 'globe');
+  });
+
   $('#sc-live').addEventListener('click', () => scrubber.goLive());
   $('#sc-play').addEventListener('click', () => scrubber.togglePlay());
   $('#sc-rate').addEventListener('click', () => scrubber.cycleRate());

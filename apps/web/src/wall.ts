@@ -1,33 +1,48 @@
 /**
  * DEADRECKON :: THE WALL.
  *
- * A 2D deck.gl console on a flat dark basemap. Not a photorealistic globe,
- * and that is a decision rather than a limitation:
+ * An interactive globe with real satellite imagery, MapLibre 6 in
+ * `vertical-perspective` projection, with deck.gl drawing the contacts and
+ * evidence geometry over the top.
  *
- *   - photoreal 3D tiles are the single largest cost line in a project
- *     like this, and they are billed per session
- *   - a globe hides half the planet at all times, which is exactly wrong
- *     for a system whose job is to notice things you were not looking at
- *   - this runs at 60 fps on a phone and on a locked-down work laptop
+ * This file used to open with three arguments against building a globe:
+ * that photoreal tiles are the biggest cost line in a project like this,
+ * that a globe hides half the planet, and that flat runs at 60 fps on weak
+ * hardware. The first turned out to be false -- NASA GIBS is public domain
+ * and free, so the imagery costs nothing. The second is real but is a
+ * navigation problem, solved by the watchbox strip and the FLAT toggle,
+ * not a reason to refuse the projection. The third still holds, which is
+ * why flat Mercator is one click away and shares every layer.
+ *
+ * The honest cost of being wrong about this: a console that opened onto an
+ * unlabelled dark rectangle for its entire first day.
  *
  * Rendering is driven from typed arrays rebuilt each frame, so a contact
  * costs eight floats rather than a JavaScript object graph.
+ *
+ * Text is deliberately NOT drawn with deck.gl here. TextLayer on a globe
+ * has open bugs in deck.gl 9.3 (renders at the origin, or upside down),
+ * and the fix was pulled from that milestone and left in draft. All labels
+ * are MapLibre symbol layers instead, which also buys free collision
+ * against the basemap's own place names. See basemap.ts.
  */
 
-import maplibregl from 'maplibre-gl';
+// MapLibre 6 removed the default export; everything is named now.
+import {
+  Map as MapLibreMap,
+  NavigationControl,
+  ScaleControl,
+  type GeoJSONSource,
+  type LngLatBounds,
+  type MapLayerMouseEvent,
+} from 'maplibre-gl';
 import { MapboxOverlay } from '@deck.gl/mapbox';
-import { ScatterplotLayer, PathLayer, PolygonLayer, TextLayer } from '@deck.gl/layers';
+import { ScatterplotLayer, PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { ObsFlag } from '@deadreckon/core';
 import type { Contact } from './net.js';
+import { buildStyle, watchboxGeoJSON, type Projection, type WatchBox } from './basemap.js';
 
-export interface WatchBox {
-  key: string;
-  label: string;
-  min_lat: number;
-  min_lon: number;
-  max_lat: number;
-  max_lon: number;
-}
+export type { WatchBox };
 
 export interface DetectionPin {
   id: number;
@@ -53,7 +68,7 @@ const DEGRADED: RGBA = [255, 214, 102, 230];
 const DARK: RGBA = [120, 140, 158, 170];
 
 export class Wall {
-  readonly map: maplibregl.Map;
+  readonly map: MapLibreMap;
   private overlay: MapboxOverlay;
 
   private contacts: Contact[] = [];
@@ -69,44 +84,67 @@ export class Wall {
   private satellites: { lon: number; lat: number; name: string }[] = [];
   private orbitVisible = true;
   private pulse = 0;
+  private projection: Projection = 'globe';
+  private styleReady = false;
 
   constructor(
     container: string,
     private readonly onPick: (c: Contact | null) => void,
     private readonly onDetectionPick: (d: DetectionPin) => void,
-    private readonly onMove: (b: maplibregl.LngLatBounds, zoom: number) => void,
+    private readonly onMove: (b: LngLatBounds, zoom: number) => void,
   ) {
-    this.map = new maplibregl.Map({
+    this.map = new MapLibreMap({
       container,
-      // CARTO dark-matter, WITH labels.
-      //
-      // The first version used the no-labels variant, on the theory that
-      // the data should be the brightest thing on screen. That theory was
-      // wrong. An unlabelled dark map is not restrained, it is illegible:
-      // you cannot tell Iran from Oman, you cannot find the Strait of
-      // Malacca, and you have no anchor for anything the console tells you.
-      // Orientation is not decoration.
-      style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+      style: buildStyle(this.projection),
       center: [56.3, 26.5], // Strait of Hormuz
-      zoom: 5.4,
-      minZoom: 1.4,
+      zoom: 2.6,
+      minZoom: 0.6,
       maxZoom: 14,
       attributionControl: { compact: true },
       dragRotate: false,
       pitchWithRotate: false,
-      renderWorldCopies: true,
+      renderWorldCopies: false,
     });
 
-    this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+    this.map.addControl(new NavigationControl({ showCompass: false }), 'top-left');
     this.map.addControl(
-      new maplibregl.ScaleControl({ unit: 'nautical' as never }),
+      new ScaleControl({ unit: 'nautical' as never }),
       'bottom-right',
     );
 
+    // interleaved: false, deliberately.
+    //
+    // deck.gl 9.3 has an open bug (#10206) where, in interleaved mode on a
+    // globe, ScatterplotLayer circles are not draped onto the sphere and
+    // z-fight while panning. Overlaid mode renders deck to its own canvas
+    // above MapLibre and sidesteps the whole class of problem. The cost is
+    // that deck geometry always sits above the basemap labels, which for a
+    // contact display is the correct stacking anyway.
     this.overlay = new MapboxOverlay({ interleaved: false, layers: [] });
     this.map.addControl(this.overlay as never);
 
-    this.map.on('load', () => this.tintBasemap());
+    this.map.on('load', () => {
+      this.styleReady = true;
+      this.pushWatchboxes();
+      // A slow arc onto the watchbox, so the first thing you see is a
+      // recognisable planet rather than a rectangle you have to decode.
+      this.map.easeTo({ center: [56.3, 26.5], zoom: 4.6, duration: 2600 });
+    });
+
+    // Clicking a watchbox rectangle frames it.
+    this.map.on('click', 'wb-fill', (e: MapLayerMouseEvent) => {
+      const key = e.features?.[0]?.properties?.key;
+      const b = this.watchboxes.find((w) => w.key === key);
+      if (b) this.fitBox(b);
+    });
+    for (const id of ['wb-fill', 'wb-label']) {
+      this.map.on('mouseenter', id, () => {
+        this.map.getCanvas().style.cursor = 'pointer';
+      });
+      this.map.on('mouseleave', id, () => {
+        this.map.getCanvas().style.cursor = '';
+      });
+    }
 
     let t: number | undefined;
     const emit = (): void => {
@@ -126,88 +164,42 @@ export class Wall {
     }, 125);
   }
 
+  /* ---------------------------------------------------------- projection */
+
   /**
-   * Retint the basemap for a dark console without destroying legibility.
+   * Switch between the globe and a flat Mercator map.
    *
-   * The previous version flattened every fill to one near-black and every
-   * line to one barely-visible grey, which erased coastlines, borders and
-   * the land/water distinction all at once. The map has to stay readable
-   * or nothing plotted on it means anything.
-   *
-   * Layers are treated by role rather than by type:
-   *   water        darkest, so contacts at sea read hottest
-   *   land         a visible plate, clearly not water
-   *   borders      brightest basemap element, for orientation
-   *   roads        suppressed, they are noise at this scale
-   *   place names  dim but readable, with a halo so they survive over data
+   * Both are useful for different work. The globe is how you understand
+   * that the Strait of Hormuz and the Strait of Malacca are two ends of
+   * the same tanker route. Mercator is how you actually read a chokepoint
+   * at 5 nm across without the edges falling away from you.
    */
-  private tintBasemap(): void {
-    const style = this.map.getStyle();
+  setProjection(p: Projection): void {
+    if (p === this.projection) return;
+    this.projection = p;
+    try {
+      this.map.setProjection({
+        type: p === 'globe' ? 'vertical-perspective' : 'mercator',
+      } as never);
+    } catch {
+      // Older MapLibre without globe support. Rebuild the style instead of
+      // leaving the console in a half-switched state.
+      this.map.setStyle(buildStyle(p));
+      this.map.once('styledata', () => this.pushWatchboxes());
+    }
+  }
 
-    const set = (id: string, prop: string, val: unknown): void => {
-      try {
-        this.map.setPaintProperty(id, prop, val as never);
-      } catch {
-        /* not every layer accepts every property */
-      }
-    };
+  get currentProjection(): Projection {
+    return this.projection;
+  }
 
-    for (const layer of style.layers ?? []) {
-      const id = layer.id;
-      const isWater = /water|ocean|sea|river|lake|bathym/i.test(id);
-      const isBoundary = /boundary|border|admin/i.test(id);
-      const isRoad = /road|transport|bridge|tunnel|rail|aeroway|runway/i.test(id);
-      const isBuilding = /building/i.test(id);
-
-      switch (layer.type) {
-        case 'background':
-          set(id, 'background-color', '#050912');
-          break;
-
-        case 'fill':
-          if (isWater) {
-            set(id, 'fill-color', '#050A12');
-            set(id, 'fill-opacity', 1);
-          } else if (isBuilding) {
-            set(id, 'fill-opacity', 0);
-          } else {
-            // Land. Visibly lighter than water, which is the single most
-            // important contrast on a maritime console.
-            set(id, 'fill-color', '#111A24');
-            set(id, 'fill-opacity', 0.92);
-          }
-          break;
-
-        case 'line':
-          if (isBoundary) {
-            set(id, 'line-color', '#33506B');
-            set(id, 'line-opacity', 0.9);
-            set(id, 'line-width', 0.8);
-          } else if (isRoad) {
-            set(id, 'line-opacity', 0);
-          } else {
-            // Coastlines and waterways.
-            set(id, 'line-color', '#24384B');
-            set(id, 'line-opacity', 0.75);
-          }
-          break;
-
-        case 'symbol': {
-          // Place names. Dim enough not to compete with contacts, haloed
-          // enough to survive being drawn over. Countries and seas read
-          // brightest because those are the labels you navigate by.
-          const major = /country|continent|marine|ocean|sea|state/i.test(id);
-          set(id, 'text-color', major ? '#93AEC6' : '#5D748B');
-          set(id, 'text-halo-color', '#050912');
-          set(id, 'text-halo-width', 1.4);
-          set(id, 'text-halo-blur', 0.4);
-          set(id, 'icon-opacity', 0);
-          break;
-        }
-
-        default:
-          break;
-      }
+  private pushWatchboxes(): void {
+    if (!this.styleReady) return;
+    const src = this.map.getSource('watchboxes');
+    if (src && 'setData' in src) {
+      (src as GeoJSONSource).setData(
+        watchboxGeoJSON(this.watchboxes) as never,
+      );
     }
   }
 
@@ -281,6 +273,7 @@ export class Wall {
   }
   setWatchboxes(w: WatchBox[]): void {
     this.watchboxes = w;
+    this.pushWatchboxes();
     this.render();
   }
   setCone(poly: [number, number][] | null): void {
@@ -328,53 +321,13 @@ export class Wall {
 
     this.overlay.setProps({
       layers: [
-        // Watchboxes. These used to be a barely-visible hairline, which
-        // meant a zoomed-out map looked like an empty void rather than a
-        // system watching ten specific places on purpose. If the console
-        // does not say where it is looking, the reader assumes it is broken.
-        new PolygonLayer<WatchBox>({
-          id: 'watchboxes',
-          data: this.watchboxes,
-          getPolygon: (d) => [
-            [
-              [d.min_lon, d.min_lat],
-              [d.max_lon, d.min_lat],
-              [d.max_lon, d.max_lat],
-              [d.min_lon, d.max_lat],
-              [d.min_lon, d.min_lat],
-            ],
-          ],
-          stroked: true,
-          filled: true,
-          getFillColor: [0, 217, 255, 14],
-          getLineColor: [0, 217, 255, 120],
-          getLineWidth: 1.4,
-          lineWidthUnits: 'pixels',
-          pickable: true,
-          onClick: (info) => {
-            const w = info.object as WatchBox | undefined;
-            if (!w) return false;
-            this.fitBox(w);
-            return true;
-          },
-        }),
-
-        this.watchboxes.length > 0 &&
-          new TextLayer<WatchBox>({
-            id: 'watchbox-label',
-            data: this.watchboxes,
-            getPosition: (d) => [
-              (d.min_lon + d.max_lon) / 2,
-              (d.min_lat + d.max_lat) / 2,
-            ],
-            getText: (d) => d.label.toUpperCase(),
-            getSize: 9.5,
-            getColor: [0, 217, 255, 150],
-            fontFamily: "'JetBrains Mono', monospace",
-            characterSet: 'auto',
-            getPixelOffset: [0, -4],
-            pickable: false,
-          }),
+        // Watchbox rectangles and their labels are MapLibre layers now,
+        // not deck.gl ones. deck.gl's TextLayer has open, unfixed bugs on
+        // a globe -- it can render at the origin or upside down, and the
+        // fix was pulled from the 9.3 milestone and left in draft. MapLibre
+        // symbol layers have none of that, and give free label collision
+        // against the basemap's own place names as a bonus.
+        // See basemap.ts and pushWatchboxes().
 
         // The reachable set. The verdict, drawn.
         this.cone &&
@@ -481,20 +434,11 @@ export class Wall {
             },
           }),
 
-        this.detections.length > 0 &&
-          this.detections.length < 40 &&
-          new TextLayer<DetectionPin>({
-            id: 'det-label',
-            data: this.detections,
-            getPosition: (d) => [d.lon, d.lat],
-            getText: (d) => d.rule.replace(/_/g, ' '),
-            getSize: 9,
-            getColor: (d) => sevColor(d.severity, 210),
-            getPixelOffset: [0, -16],
-            fontFamily: "'JetBrains Mono', monospace",
-            characterSet: 'auto',
-            pickable: false,
-          }),
+        // Detection rule names were a deck.gl TextLayer here. Removed for
+        // the same reason as the watchbox labels: TextLayer on a globe is
+        // an open bug in deck.gl 9.3. The ticker carries the rule name,
+        // the pulsing ring carries the severity, and hovering carries the
+        // rest, so nothing was actually lost.
       ].filter(Boolean) as never[],
     });
   }
