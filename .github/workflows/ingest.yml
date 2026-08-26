@@ -1,0 +1,87 @@
+name: ingest
+
+# DEADRECKON :: hosted ingest, without a server.
+#
+# Render has no free background worker tier, and folding ingest into the
+# free web service would mean the archive only fills while somebody has the
+# page open -- which would quietly invert the whole premise. This runs the
+# same collection code on a schedule instead, so the archive fills whether
+# or not anyone is looking.
+#
+# Honest about what this is NOT: a five-minute cron is not a continuous
+# feed. GitHub also delays scheduled runs under load, sometimes by more
+# than the interval. Expect small, irregular gaps. That is a worse archive
+# than a dedicated worker and a much better one than nothing.
+#
+# REQUIRED repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABASE_URL         the EXTERNAL Render Postgres URL
+#   AISSTREAM_API_KEY    free from aisstream.io; without it the sea domain
+#                        is off and DARK_VESSEL cannot fire
+# OPTIONAL:
+#   FIRMS_MAP_KEY        free from NASA FIRMS, enables the thermal domain
+
+on:
+  schedule:
+    # Every 5 minutes is the finest granularity GitHub accepts.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      run_seconds:
+        description: 'Collection window in seconds'
+        required: false
+        default: '240'
+
+# Never let two runs write concurrently. The engine's detection hashes make
+# duplicate work harmless, but two AIS streams would double the upstream
+# load for no benefit, and overlapping retention passes are pointless.
+concurrency:
+  group: deadreckon-ingest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    # Watchdog of last resort. The job's own watchdog fires first.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build:server
+
+      - name: Collect and evaluate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          RUN_SECONDS: ${{ github.event.inputs.run_seconds || '240' }}
+          POLL_AIR_S: '15'
+          POLL_ORBIT_S: '21600'
+          RETAIN_RAW_H: '48'
+          RETAIN_TRACK_H: '720'
+          NODE_OPTIONS: '--max-old-space-size=3072'
+        run: node packages/ingest/dist/once.js
+
+      - name: Fail loudly if the database was unreachable
+        if: failure()
+        run: |
+          echo "::error::Ingest run failed. Most likely causes:"
+          echo "::error::  1. DATABASE_URL secret is stale. If you rotated the Render"
+          echo "::error::     database credential, update the secret here too."
+          echo "::error::  2. The Render Postgres IP allow list does not include"
+          echo "::error::     0.0.0.0/0. GitHub runners have no fixed egress IP,"
+          echo "::error::     so an allow list narrower than that will block them."
+          echo "::error::  3. The free Postgres expired. It lasts 30 days."
+          exit 1

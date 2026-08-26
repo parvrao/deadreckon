@@ -80,7 +80,27 @@ if (invokedDirectly) {
     .then(() => closePool())
     .then(() => process.exit(0))
     .catch((err) => {
+      const code = (err as { code?: string }).code;
       console.error('[migrate] FAILED:', err);
+
+      // A build log that ends in a raw stack trace makes the operator go
+      // and read source. Name the cause where they are already looking.
+      const hint: Record<string, string> = {
+        '28000':
+          'The database user cannot log in. This is what a rotated-and-deleted\n' +
+          '  credential looks like. Set DATABASE_URL on this service to the current\n' +
+          '  Internal Database URL from the database\'s Connections section.',
+        '28P01': 'Password authentication failed. DATABASE_URL is stale.',
+        '3D000': 'That database does not exist. Check the name in DATABASE_URL.',
+        '08006':
+          'Could not reach the database. Check it is running, and that the IP\n' +
+          '  allow list permits this connection.',
+        ECONNREFUSED:
+          'Nothing is listening at that host and port. Check DATABASE_URL.',
+      };
+      if (code && hint[code]) {
+        console.error(`\n[migrate] ${code}: ${hint[code]}\n`);
+      }
       process.exit(1);
     });
 }

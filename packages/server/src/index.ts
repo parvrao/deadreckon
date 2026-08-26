@@ -87,15 +87,17 @@ const PG_HINT: Record<string, string> = {
 };
 
 app.setErrorHandler((err, req, reply) => {
-  const code = (err as { code?: string }).code;
+  const e = err as { code?: string; message?: string };
+  const code = e.code;
+  const message = e.message ?? String(err);
   const isPg = typeof code === 'string' && /^[0-9A-Za-z]{5}$/.test(code);
 
   if (isPg || code === 'ECONNREFUSED' || code === 'ETIMEDOUT') {
-    req.log.error({ code, err: err.message }, 'dependency failure');
+    req.log.error({ code, detail: message }, 'dependency failure');
     return reply.code(503).send({
       error: 'database_unavailable',
       code: code ?? null,
-      detail: err.message,
+      detail: message,
       hint:
         (code && PG_HINT[code]) ??
         'The API could not query its database. Check /api/health and the ingest health table.',
@@ -106,7 +108,7 @@ app.setErrorHandler((err, req, reply) => {
   req.log.error({ err }, 'unhandled');
   return reply.code(500).send({
     error: 'internal',
-    detail: err.message,
+    detail: message,
   });
 });
 

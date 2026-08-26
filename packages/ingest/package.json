@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc -b",
     "dev": "node --watch dist/worker.js",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "start:once": "node dist/once.js"
   },
   "dependencies": {
     "@deadreckon/core": "*",

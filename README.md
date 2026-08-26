@@ -188,7 +188,47 @@ The repo ships a Blueprint. From a fresh push:
 `scripts/bootstrap.sh` does step 0 — creates the GitHub repo, commits, pushes,
 and prints the exact follow-up.
 
-Two things to know about the free tier:
+### Where the ingest worker runs
+
+Render has **no free background worker tier**, so `render.yaml` deliberately
+does not declare one. Three options, in order of how faithful they are to the
+premise:
+
+**1. GitHub Actions (free, hosted).** `.github/workflows/ingest.yml` runs the
+same collection code in a bounded window every five minutes. Set two repository
+secrets under Settings → Secrets and variables → Actions:
+
+| Secret | Value |
+|---|---|
+| `DATABASE_URL` | the **External** Render Postgres URL |
+| `AISSTREAM_API_KEY` | free from [aisstream.io](https://aisstream.io) |
+| `FIRMS_MAP_KEY` | optional, free from NASA FIRMS |
+
+The database's IP allow list must include `0.0.0.0/0`, because GitHub runners
+have no fixed egress address.
+
+Honest about what this is not: a five-minute cron is not a continuous feed, and
+GitHub delays scheduled runs under load. Expect small irregular gaps. But
+ingestion stays independent of whether anyone is watching, which is the
+property that matters.
+
+**2. A dedicated worker ($7/month on Render, free on any always-on box).**
+Restore the `deadreckon-ingest` block and run `node packages/ingest/dist/worker.js`.
+Continuous, no gaps, no compromises.
+
+**3. Locally, for development.**
+
+```bash
+npm pkg set 'scripts.start:ingest:local=node --env-file=.env packages/ingest/dist/worker.js'
+npm run start:ingest:local
+```
+
+**What is not an option:** folding ingest into the free web service. Free
+instances sleep after 15 minutes without traffic, so the archive would only
+fill while somebody had the page open. That inverts the premise from "nobody
+has to press record" into "somebody has to keep a tab open."
+
+### Free tier caveats
 
 - **Render free Postgres expires after 30 days.** For anything permanent, point
   `DATABASE_URL` at Neon or Supabase on both services and delete the

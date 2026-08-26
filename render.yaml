@@ -35,10 +35,24 @@ services:
         value: production
       - key: NODE_OPTIONS
         value: --max-old-space-size=460
+      # Set MANUALLY in the dashboard, not linked with fromDatabase.
+      #
+      # fromDatabase resolves to whichever Postgres user is currently
+      # "default", and Render's docs say it re-resolves "on the next
+      # Blueprint sync". In practice, after rotating the credential and
+      # deleting the old user, the service kept building with the deleted
+      # one and every deploy died on SQLSTATE 28000. Possibly a missed
+      # sync, possibly the link not re-resolving. Either way an
+      # indirection that silently serves a revoked credential is worse
+      # than a value you can read on the page.
+      #
+      # Paste the INTERNAL Database URL here (Connections -> Internal).
+      # Internal keeps the traffic on Render's private network: ~1ms
+      # instead of ~40ms, and it never touches the IP allow list.
+      #
+      # After any future credential rotation, update this by hand.
       - key: DATABASE_URL
-        fromDatabase:
-          name: deadreckon-db
-          property: connectionString
+        sync: false
       - key: FANOUT_TICK_MS
         value: "1000"
       - key: MAX_CELLS_PER_SOCKET
