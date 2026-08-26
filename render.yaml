@@ -1,38 +1,25 @@
-# DEADRECKON :: Render Blueprint
+# DEADRECKON :: Render Blueprint (free-tier only)
 #
-# One-click infrastructure. From a fresh GitHub repo:
-#   Render Dashboard -> New -> Blueprint -> pick this repo -> Apply
+# Render has no free background worker, so deadreckon-ingest is NOT
+# declared here. The ingest worker runs on a laptop and writes to this
+# database over its external URL. See README "Running the worker locally".
 #
-# Topology (this IS the scalability thesis, expressed as infrastructure):
-#
-#   [ deadreckon-ingest ]  background worker, exactly ONE replica.
-#        |                 Polls every upstream source once. Never scales
-#        |                 horizontally on purpose -- upstream cost is O(1)
-#        |                 regardless of how many humans are watching.
-#        v
-#   [ deadreckon-db ]      Postgres. Append-only observation archive +
-#        |                 provenance hash chain + detections.
-#        v
-#   [ deadreckon-api ]     web service, scales to N replicas. Reads only.
-#        |                 Holds the WebSocket fan-out hub. Every extra
-#        |                 viewer costs one socket, not one upstream call.
-#        v
-#   [ deadreckon-web ]     static site on CDN. Zero server cost.
-#
+# The architecture already separates the single writer from the readers,
+# so moving the writer off-platform needs no code change at all.
+
 databases:
   - name: deadreckon-db
     databaseName: deadreckon
     user: deadreckon
-    plan: free # NOTE: Render free Postgres expires after 30 days.
-      # For anything permanent set DATABASE_URL to a Neon/Supabase
-      # connection string on both services and delete this block.
+    plan: free # 1 GB, ONE per workspace, EXPIRES 30 DAYS AFTER CREATION
     postgresMajorVersion: "16"
-    ipAllowList: []
+    ipAllowList:
+      # Required so the laptop-hosted ingest worker can connect. The API
+      # reaches the database over Render's private network regardless.
+      - source: 0.0.0.0/0
+        description: laptop ingest worker
 
 services:
-  # ---------------------------------------------------------------
-  # READ PATH - horizontally scalable, stateless, WebSocket fan-out
-  # ---------------------------------------------------------------
   - type: web
     name: deadreckon-api
     runtime: node
@@ -57,63 +44,8 @@ services:
       - key: MAX_CELLS_PER_SOCKET
         value: "512"
       - key: CORS_ORIGIN
-        sync: false # set to your static site URL after first deploy
-
-  # ---------------------------------------------------------------
-  # WRITE PATH - exactly one replica, forever. This is deliberate.
-  # ---------------------------------------------------------------
-  - type: worker
-    name: deadreckon-ingest
-    runtime: node
-    plan: starter # workers are not available on Render's free tier
-    region: oregon
-    branch: main
-    buildCommand: npm ci && npm run build:server
-    startCommand: node packages/ingest/dist/worker.js
-    autoDeploy: true
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: NODE_OPTIONS
-        value: --max-old-space-size=460
-      - key: DATABASE_URL
-        fromDatabase:
-          name: deadreckon-db
-          property: connectionString
-
-      # --- source cadence (seconds) ---
-      - key: POLL_AIR_S
-        value: "10"
-      - key: POLL_ORBIT_S
-        value: "21600"
-      - key: POLL_GEO_S
-        value: "60"
-      - key: POLL_THERMAL_S
-        value: "900"
-
-      # --- retention (hours). Tiered so free Postgres survives. ---
-      - key: RETAIN_RAW_H
-        value: "48"
-      - key: RETAIN_TRACK_H
-        value: "720"
-
-      # --- credentials. All optional; each source degrades gracefully. ---
-      # aisstream.io  -> free key, global AIS over WebSocket
-      - key: AISSTREAM_API_KEY
-        sync: false
-      # NASA FIRMS    -> free key, VIIRS/MODIS active fire
-      - key: FIRMS_MAP_KEY
-        sync: false
-      # OpenSky       -> optional OAuth2 client credentials, raises rate limit.
-      #                  Without these we fall back to adsb.lol (no key needed).
-      - key: OPENSKY_CLIENT_ID
-        sync: false
-      - key: OPENSKY_CLIENT_SECRET
         sync: false
 
-  # ---------------------------------------------------------------
-  # THE WALL - static, CDN-cached, no server
-  # ---------------------------------------------------------------
   - type: web
     name: deadreckon-web
     runtime: static
@@ -124,17 +56,14 @@ services:
     autoDeploy: true
     envVars:
       - key: VITE_API_URL
-        sync: false # https://deadreckon-api.onrender.com
+        sync: false
       - key: VITE_WS_URL
-        sync: false # wss://deadreckon-api.onrender.com/stream
+        sync: false
     routes:
       - type: rewrite
         source: /*
         destination: /index.html
     headers:
-      - path: /*
-        name: X-Frame-Options
-        value: SAMEORIGIN
       - path: /assets/*
         name: Cache-Control
         value: public, max-age=31536000, immutable
