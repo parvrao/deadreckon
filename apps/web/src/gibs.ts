@@ -9,23 +9,29 @@
  * Every one is US federal work, effectively public domain, no API key.
  *
  * ---------------------------------------------------------------------
- * A CAVEAT WORTH READING BEFORE TRUSTING THE `matrix` FIELD
+ * THE `matrix`, `ext` AND `lagDays` FIELDS ARE FALLBACKS, NOT TRUTH
  *
  * GIBS addresses Web Mercator tiles as
  *   /wmts/epsg3857/best/{layer}/default/{time}/{TileMatrixSet}/{z}/{y}/{x}.{ext}
  * where TileMatrixSet is `GoogleMapsCompatible_Level{N}` and N is that
- * layer's maximum zoom. N differs per layer and is only authoritative in
- * GIBS' own GetCapabilities document.
+ * layer's maximum zoom. N differs per layer, as do the image format and
+ * the newest date the product actually holds.
  *
- * The values below follow GIBS' documented conventions but I have NOT
- * verified every one against GetCapabilities. A wrong N means the tiles
- * 404, which MapLibre renders as nothing rather than as an error. So the
- * panel tracks tile failures per layer and marks anything that is not
- * answering, instead of leaving you staring at a layer that silently
- * shows an empty globe. If one is marked unavailable, that is the likely
- * reason and the fix is one number.
+ * The values below are hand-written guesses following GIBS' documented
+ * conventions, and they were WRONG for at least MODIS_Terra_Aerosol,
+ * OMI_Nitrogen_Dioxide_Tropo_Column and IMERG_Precipitation_Rate: each
+ * fired several hundred 404s per toggle and drew nothing. A wrong value
+ * does not announce itself, because a 404 tile and an empty tile look
+ * identical on the globe.
+ *
+ * So these are no longer the source of truth. gibsCaps.ts reads GIBS'
+ * own GetCapabilities document in the background and overrides all three
+ * fields with NASA's answer. These remain only as the offline fallback
+ * for when that fetch fails, and any one of them may still be wrong.
  * ---------------------------------------------------------------------
  */
+
+import type { ResolvedLayer } from './gibsCaps.js';
 
 export type LayerKind = 'base' | 'overlay';
 
@@ -204,13 +210,85 @@ function isoDay(lagDays: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+/* ------------------------------------------------- resolved overrides */
+
+/**
+ * Authoritative per-layer metadata from GIBS, keyed by GIBS layer
+ * identifier. Populated once by main.ts after the map has loaded.
+ */
+const RESOLVED = new Map<string, ResolvedLayer>();
+
+/** Every GIBS layer identifier this app can request. */
+export const GIBS_LAYER_IDS: readonly string[] = GIBS_LAYERS.map((l) => l.layer);
+
+/**
+ * Adopt GIBS' own metadata. Returns the ids that actually changed, so the
+ * caller knows whether existing sources need rebuilding.
+ */
+export function applyResolved(entries: Record<string, ResolvedLayer>): string[] {
+  const changed: string[] = [];
+  for (const l of GIBS_LAYERS) {
+    const r = entries[l.layer];
+    if (!r) continue;
+    const differs =
+      r.tileMatrixSet !== `GoogleMapsCompatible_Level${l.matrix}` ||
+      r.ext !== l.ext;
+    RESOLVED.set(l.layer, r);
+    if (differs) {
+      changed.push(l.id);
+      console.info(
+        `[gibs] ${l.layer}: guessed ` +
+          `GoogleMapsCompatible_Level${l.matrix}/.${l.ext}, GIBS says ` +
+          `${r.tileMatrixSet}/.${r.ext}`,
+      );
+    }
+  }
+  return changed;
+}
+
+export function resolvedFor(l: GibsLayer): ResolvedLayer | undefined {
+  return RESOLVED.get(l.layer);
+}
+
+/** MapLibre's `maxzoom` for this layer's raster source. */
+export function effectiveMaxZoom(l: GibsLayer): number {
+  return resolvedFor(l)?.maxZoom ?? l.matrix;
+}
+
+/** The date a layer is currently being requested at, or null if static. */
+export function effectiveDate(l: GibsLayer): string | null {
+  if (!l.temporal) return null;
+  return resolvedFor(l)?.defaultTime ?? isoDay(l.lagDays ?? 0);
+}
+
+/**
+ * The previous day, for one retry after a temporal layer 404s.
+ *
+ * Daily products land at different times and some slip. Rather than
+ * encode a per-product latency I cannot verify, we ask for the newest
+ * date and step back exactly once if that is not there yet. One retry
+ * covers the common case without turning a dead layer into a crawl
+ * backwards through the archive.
+ */
+export function previousDate(current: string): string {
+  const t = Date.parse(`${current}T00:00:00Z`);
+  if (Number.isNaN(t)) return current;
+  return new Date(t - 86_400_000).toISOString().slice(0, 10);
+}
+
 /** Tile URL templates for a layer, one per GIBS host. */
 export function tileUrls(l: GibsLayer, dateOverride?: string): string[] {
-  const time = l.temporal ? (dateOverride ?? isoDay(l.lagDays ?? 0)) : 'default';
+  const r = resolvedFor(l);
+  const tms = r?.tileMatrixSet ?? `GoogleMapsCompatible_Level${l.matrix}`;
+  const ext = r?.ext ?? l.ext;
+  const time = !l.temporal
+    ? 'default'
+    : (dateOverride ?? r?.defaultTime ?? isoDay(l.lagDays ?? 0));
+
   return HOSTS.map(
     (h) =>
       `https://${h}.earthdata.nasa.gov/wmts/epsg3857/best/${l.layer}` +
-      `/default/${time}/GoogleMapsCompatible_Level${l.matrix}/{z}/{y}/{x}.${l.ext}`,
+      `/default/${time}/${tms}/{z}/{y}/{x}.${ext}`,
   );
 }
 

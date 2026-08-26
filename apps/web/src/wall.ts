@@ -62,23 +62,60 @@ import {
  * The map never initialises, and because the whole console is downstream
  * of the map, nothing works and the error names none of this.
  *
- * `?url` makes Vite copy the real worker into dist/assets with a content
- * hash and hand back its resolved path. setWorkerUrl points MapLibre at
- * it. This runs at module scope, before any Map is constructed, which is
- * required -- the docs are explicit that it must be set before prewarm().
+ * `?worker&url` makes Vite BUNDLE the worker -- following its imports --
+ * into a self-contained chunk and hand back the resolved path.
+ * setWorkerUrl points MapLibre at it. This runs at module scope, before
+ * any Map is constructed, which is required: the docs are explicit that it
+ * must be set before prewarm().
  *
- * I first tried to fix this by removing manualChunks, on the theory that
- * chunking had broken the emit. It had not. The reference was never
- * statically analysable in the first place.
+ * ---------------------------------------------------------------------
+ * WHY `?worker&url` AND NOT PLAIN `?url`
+ *
+ * `?url` was the first fix and it was wrong in a way that looked right.
+ * It emitted dist/assets/maplibre-gl-worker-<hash>.mjs, the build log
+ * showed the file, and the original error went away. But `?url` copies a
+ * file VERBATIM and does not follow what it imports, and that worker is
+ * 18 KB of glue whose one real statement is:
+ *
+ *   from "./maplibre-gl-shared.mjs"
+ *
+ * -- a 489 KB sibling that was therefore never emitted. So the worker
+ * booted, immediately requested /assets/maplibre-gl-shared.mjs, got the
+ * /assets/* -> /404-asset rewrite, and died on a response with no
+ * Content-Type at all:
+ *
+ *   Failed to load module script: non-JavaScript MIME type of ""
+ *
+ * Same failure as before, one level deeper, and the changed MIME type
+ * (empty rather than "text/html") was the only clue that it was a
+ * different missing file rather than the same one.
+ *
+ * `?worker` is the suffix that makes Vite treat the target as a worker
+ * ENTRY POINT and bundle its dependency graph. Adding `&url` gives back a
+ * URL string instead of a constructor, which is what setWorkerUrl wants.
+ *
+ * The check that this is actually fixed is not "does the build log
+ * mention a worker file" but "is that file big enough to contain the
+ * shared module", i.e. hundreds of KB rather than 18. See the
+ * verify:worker script.
+ * ---------------------------------------------------------------------
  */
-import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 setWorkerUrl(maplibreWorkerUrl);
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { ScatterplotLayer, PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { ObsFlag } from '@deadreckon/core';
 import type { Contact } from './net.js';
 import { buildStyle, watchboxGeoJSON, type Projection, type WatchBox } from './basemap.js';
-import { GIBS_ATTRIBUTION, tileUrls, type GibsLayer } from './gibs.js';
+import {
+  BASE_LAYERS,
+  GIBS_ATTRIBUTION,
+  tileUrls,
+  effectiveMaxZoom,
+  effectiveDate,
+  previousDate,
+  type GibsLayer,
+} from './gibs.js';
 import { frameUrl, type Camera } from './cameras.js';
 
 export type { WatchBox };
@@ -130,6 +167,24 @@ export class Wall {
   private pendingBase: { l: GibsLayer; date?: string } | null = null;
   /** Layer ids whose tiles are 404ing or erroring. */
   private tileErrors = new Set<string>();
+  /**
+   * GIBS layers currently mounted, so a failing one can be retried at an
+   * earlier date and then torn down rather than left requesting forever.
+   */
+  private mounted = new Map<
+    string,
+    { l: GibsLayer; date?: string; retried: boolean }
+  >();
+  /**
+   * Consecutive tile errors per layer.
+   *
+   * Not a boolean, because a single failed request is usually a dropped
+   * connection rather than a misconfigured layer, and tearing a good layer
+   * down on one blip is worse than a few wasted requests. Sharded across
+   * three GIBS hosts, a genuinely broken layer clears this in well under a
+   * second.
+   */
+  private errorCount = new Map<string, number>();
   private cameras: Camera[] = [];
   private camerasVisible = false;
 
@@ -212,18 +267,19 @@ export class Wall {
     this.map.on('zoomend', emit);
 
     // Tile failures, attributed back to the layer that caused them.
+    //
+    // This used to warn once and do nothing else, which was the actual
+    // cause of the 404 flood: MapLibre keeps a broken source mounted and
+    // re-requests its tiles on every pan and zoom, so one bad layer
+    // produced several hundred failed requests and buried every other
+    // message in the console. Noticing a failure is not the same as
+    // handling it.
     this.map.on('error', (e: unknown) => {
       const src = (e as { sourceId?: string }).sourceId;
       if (!src) return;
+      if (src !== 'satellite' && !src.startsWith('ov-')) return;
       const id = src === 'satellite' ? this.activeBase : src.replace(/^ov-/, '');
-      if (!this.tileErrors.has(id)) {
-        this.tileErrors.add(id);
-        console.warn(
-          `[wall] layer "${id}" is not serving tiles. Most likely its ` +
-            `GoogleMapsCompatible_Level is wrong in gibs.ts.`,
-        );
-        this.onLayerError?.(id);
-      }
+      this.onTileFailure(id);
     });
 
     // The panel collapsing changes this container's width, and MapLibre
@@ -295,6 +351,8 @@ export class Wall {
       return;
     }
     this.activeBase = l.id;
+    this.mounted.set(l.id, { l, date, retried: false });
+    this.errorCount.delete(l.id);
     try {
       if (this.map.getLayer('satellite')) this.map.removeLayer('satellite');
       if (this.map.getSource('satellite')) this.map.removeSource('satellite');
@@ -303,7 +361,7 @@ export class Wall {
         type: 'raster',
         tiles: tileUrls(l, date),
         tileSize: 256,
-        maxzoom: l.matrix,
+        maxzoom: effectiveMaxZoom(l),
         attribution: GIBS_ATTRIBUTION,
       });
       // Immediately above the background, below everything else.
@@ -333,15 +391,23 @@ export class Wall {
         if (this.map.getLayer(sid)) this.map.removeLayer(sid);
         if (this.map.getSource(sid)) this.map.removeSource(sid);
         this.activeOverlays.delete(l.id);
+        this.mounted.delete(l.id);
+        this.errorCount.delete(l.id);
         return;
       }
       if (this.map.getSource(sid)) return;
+
+      // Re-enabling a layer that previously failed is an explicit request
+      // to try again, so clear the old verdict rather than refusing.
+      this.tileErrors.delete(l.id);
+      this.errorCount.delete(l.id);
+      this.mounted.set(l.id, { l, date, retried: false });
 
       this.map.addSource(sid, {
         type: 'raster',
         tiles: tileUrls(l, date),
         tileSize: 256,
-        maxzoom: l.matrix,
+        maxzoom: effectiveMaxZoom(l),
         attribution: GIBS_ATTRIBUTION,
       });
       this.map.addLayer(
@@ -378,6 +444,96 @@ export class Wall {
    */
   get failingLayers(): Set<string> {
     return this.tileErrors;
+  }
+
+  /**
+   * A layer's tiles are failing. Retry once at an earlier date, then stop.
+   *
+   * The two failure modes look identical from here and need opposite
+   * responses:
+   *
+   *   the product has not published today's tiles yet
+   *     -> transient, and asking for yesterday fixes it
+   *   the tile matrix set, format or layer name is wrong
+   *     -> permanent, and every further request is waste
+   *
+   * So we try the cheap fix once and, if that also fails, take the layer
+   * down and say so. Either way the request volume is bounded, which is
+   * the part that actually matters: an unbounded retry loop on a broken
+   * layer is what made the console unreadable.
+   */
+  private onTileFailure(id: string): void {
+    if (this.tileErrors.has(id)) return; // already torn down
+
+    const n = (this.errorCount.get(id) ?? 0) + 1;
+    this.errorCount.set(id, n);
+    if (n < 4) return;
+
+    const m = this.mounted.get(id);
+
+    if (m && m.l.temporal && !m.retried) {
+      const from = m.date ?? effectiveDate(m.l);
+      const back = from ? previousDate(from) : undefined;
+      if (back) {
+        console.info(
+          `[wall] ${m.l.layer} has nothing for ${from}, retrying ${back}`,
+        );
+        this.errorCount.delete(id);
+        m.retried = true;
+        if (id === this.activeBase) this.setBaseLayer(m.l, back);
+        else this.setOverlay(m.l, true, back);
+        // setOverlay/setBaseLayer reset `retried`; put it back so the
+        // second failure is final rather than looping through the archive.
+        const again = this.mounted.get(id);
+        if (again) again.retried = true;
+        return;
+      }
+    }
+
+    this.tileErrors.add(id);
+    this.errorCount.delete(id);
+    console.warn(
+      `[wall] layer "${id}" is not serving tiles and has been removed. ` +
+        `Its tile matrix set, image format or layer name is wrong. GIBS ` +
+        `metadata should override these -- see gibsCaps.ts -- so this ` +
+        `means GetCapabilities did not resolve either.`,
+    );
+
+    if (id === this.activeBase) {
+      // Never leave the globe with no imagery at all. Blue Marble is
+      // static and has no date to get wrong, so it is the safe floor.
+      const bm = BASE_LAYERS.find((b) => b.id === 'bluemarble');
+      if (bm && id !== bm.id) this.setBaseLayer(bm);
+    } else if (m) {
+      this.setOverlay(m.l, false);
+    }
+
+    this.mounted.delete(id);
+    this.onLayerError?.(id);
+  }
+
+  /**
+   * Rebuild mounted GIBS sources after GetCapabilities has corrected their
+   * tile matrix set or format.
+   *
+   * MapLibre cannot retarget a raster source's URLs in place, so anything
+   * already on screen keeps requesting the wrong tiles until it is torn
+   * down and re-added.
+   */
+  refreshGibsSources(changed: readonly string[]): void {
+    if (!changed.length || !this.styleReady) return;
+    for (const id of changed) {
+      const m = this.mounted.get(id);
+      if (!m) continue;
+      this.tileErrors.delete(id);
+      this.errorCount.delete(id);
+      if (id === this.activeBase) {
+        this.setBaseLayer(m.l);
+      } else {
+        this.setOverlay(m.l, false);
+        this.setOverlay(m.l, true);
+      }
+    }
   }
 
   private pushWatchboxes(): void {

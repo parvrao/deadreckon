@@ -23,11 +23,28 @@ import { Scrubber } from './scrubber.js';
 import { startOrbits } from './orbits.js';
 import { architectureSheet, sourcesSheet, helpSheet } from './sheets.js';
 import { Panel, type TabId } from './panel.js';
-import { BASE_LAYERS } from './gibs.js';
+import {
+  BASE_LAYERS,
+  GIBS_LAYERS,
+  GIBS_LAYER_IDS,
+  applyResolved,
+} from './gibs.js';
+import { resolveGibsLayers, missingFrom } from './gibsCaps.js';
 import { loadCameras, frameUrl, CAMERA_SOURCES, type Camera } from './cameras.js';
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T =>
   document.querySelector(s) as T;
+
+/**
+ * Run work once the browser is idle. Safari has no requestIdleCallback, so
+ * fall back to a timer rather than losing the deferral entirely.
+ */
+function scheduleIdle(fn: () => void): void {
+  const ric = (window as { requestIdleCallback?: (cb: () => void) => void })
+    .requestIdleCallback;
+  if (ric) ric(fn);
+  else window.setTimeout(fn, 1500);
+}
 
 /* ---------------------------------------------------------------- boot */
 
@@ -186,6 +203,36 @@ function mount(watchboxes: WatchBox[]): void {
   // Blue Marble is the default and is already in the style; this makes the
   // panel's radio state and the map agree from the first frame.
   wall.setBaseLayer(BASE_LAYERS[0]!);
+
+  // Ask GIBS what its own layers actually look like.
+  //
+  // The tile matrix set, image format and newest available date all differ
+  // per layer, and the hand-written values in gibs.ts were wrong for
+  // several of them. This replaces those guesses with NASA's answer.
+  //
+  // Deliberately after first paint and on the idle queue: the capabilities
+  // document is several megabytes, nothing on screen depends on it, and a
+  // stale guess showing the wrong overlay is a far smaller problem than a
+  // blank console for two seconds while a globe waits on XML.
+  scheduleIdle(() => {
+    void resolveGibsLayers(GIBS_LAYER_IDS).then((entries) => {
+      const changed = applyResolved(entries);
+      const missing = missingFrom(GIBS_LAYER_IDS, entries);
+      if (missing.length) {
+        // A layer GIBS has never heard of is a bad identifier in gibs.ts,
+        // not a transient outage, and no amount of retrying will fix it.
+        console.warn(
+          `[gibs] not present in GetCapabilities, so these can never ` +
+            `work as written: ${missing.join(', ')}`,
+        );
+        for (const id of missing) {
+          const l = GIBS_LAYERS.find((g) => g.layer === id);
+          if (l) panel.markFailing(l.id);
+        }
+      }
+      wall.refreshGibsSources(changed);
+    });
+  });
 
   $('#proj-toggle').addEventListener('click', () => {
     const next = wall.currentProjection === 'globe' ? 'flat' : 'globe';

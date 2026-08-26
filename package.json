@@ -19,7 +19,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "build:server": "npm run build -w @deadreckon/core -w @deadreckon/store -w @deadreckon/engine -w @deadreckon/ingest -w @deadreckon/server",
-    "build:web": "npm run build -w @deadreckon/core && npm run build -w @deadreckon/web",
+    "build:web": "npm run build -w @deadreckon/core && npm run build -w @deadreckon/web && npm run verify:dist",
     "typecheck": "tsc -b --pretty",
     "dev:server": "npm run dev -w @deadreckon/server",
     "dev:ingest": "npm run dev -w @deadreckon/ingest",
@@ -29,7 +29,8 @@
     "migrate": "node packages/store/dist/migrate.js",
     "test": "node --test \"test/*.test.mjs\"",
     "start:ingest:local": "node --env-file=.env packages/ingest/dist/worker.js",
-    "start:once": "node packages/ingest/dist/once.js"
+    "start:once": "node packages/ingest/dist/once.js",
+    "verify:dist": "node scripts/verify-dist.mjs apps/web/dist"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
