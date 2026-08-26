@@ -32,10 +32,47 @@ import {
   Map as MapLibreMap,
   NavigationControl,
   ScaleControl,
+  setWorkerUrl,
   type GeoJSONSource,
   type LngLatBounds,
   type MapLayerMouseEvent,
 } from 'maplibre-gl';
+
+/**
+ * Tell MapLibre where its worker actually is.
+ *
+ * MapLibre 6 ships its web worker as a separate file and locates it by
+ * string-concatenating against its own module URL:
+ *
+ *   function () {
+ *     let e = import.meta.url;
+ *     let t = e.endsWith('-dev.mjs') ? 'maplibre-gl-worker-dev.mjs'
+ *                                    : 'maplibre-gl-worker.mjs';
+ *     return new URL(`./${t}`, e).href;
+ *   }
+ *
+ * A bundler cannot statically see that, so Vite never emits the worker.
+ * Worse, after bundling `import.meta.url` is OUR bundle, so the runtime
+ * asks for /assets/maplibre-gl-worker.mjs -- a file that was never
+ * written. Render's SPA rewrite then answers that 404 with index.html and
+ * the browser rejects HTML as a module script:
+ *
+ *   Failed to load module script: non-JavaScript MIME type "text/html"
+ *
+ * The map never initialises, and because the whole console is downstream
+ * of the map, nothing works and the error names none of this.
+ *
+ * `?url` makes Vite copy the real worker into dist/assets with a content
+ * hash and hand back its resolved path. setWorkerUrl points MapLibre at
+ * it. This runs at module scope, before any Map is constructed, which is
+ * required -- the docs are explicit that it must be set before prewarm().
+ *
+ * I first tried to fix this by removing manualChunks, on the theory that
+ * chunking had broken the emit. It had not. The reference was never
+ * statically analysable in the first place.
+ */
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
+setWorkerUrl(maplibreWorkerUrl);
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { ScatterplotLayer, PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { ObsFlag } from '@deadreckon/core';
