@@ -727,30 +727,86 @@ function positionAt(t: readonly TrackPoint[], ts: number): TrackPoint | null {
 
 /**
  * An aircraft that has flown a long way and got nowhere is orbiting.
- * Airliners do not orbit; surveillance and tanker aircraft do. The metric
- * is straightness: net displacement over path length.
+ *
+ * THE FIRST VERSION WAS WRONG in exactly the way RENDEZVOUS was wrong. Its
+ * only gate was "military registration OR inside a watchbox", and the
+ * watchboxes contain Copenhagen, Istanbul, Dubai, Singapore and Panama
+ * City. It produced 68 detections at severity up to 93, which were
+ * airliners in holding stacks and helicopters working offshore fields.
+ *
+ * Holding patterns and ISR orbits are geometrically identical. What
+ * separates them is everything else about the aircraft:
+ *
+ *   1. KINEMATICS  a real ISR or tanker orbit sits at FL180-FL550 and
+ *                  above 150 kt. Helicopters and light survey aircraft
+ *                  are slower and lower; holding stacks are lower still.
+ *   2. TERMINAL    if several aircraft are flying the same racetrack in
+ *                  the same 40 km cell, that is an airport, not a
+ *                  coincidence. Same density trick that fixed RENDEZVOUS,
+ *                  and again it needs no external dataset.
+ *   3. GEOMETRY    tightened: straightness < 0.25 over >150 km of path
+ *                  and at least 25 minutes.
+ *
+ * Military registration bypasses gate 1, because a military aircraft
+ * orbiting low is more interesting than one orbiting high, not less.
  */
+const LOITER = {
+  minSogKt: 150,
+  minAltFt: 18_000,
+  maxAltFt: 55_000,
+  maxStraightness: 0.25,
+  minPathM: 150_000,
+  minDurationMin: 25,
+  minFixes: 12,
+  /** Racetracks in one geohash4 cell above which it is a terminal area. */
+  terminalPerCell: 3,
+  maxCandidates: 60,
+} as const;
+
 export async function ruleLoiter(ctx: RuleCtx): Promise<Detection[]> {
   const candidates = new Map<string, Observation>();
   for (const o of ctx.batch) {
     if (o.domain !== Domain.AIR) continue;
     if (o.flags & ObsFlag.ON_GROUND) continue;
-    if ((o.sogKt ?? 0) < 90) continue;
-    // Checking every airliner would cost a query each. Military registration
-    // or a watchbox is a cheap, high-yield pre-filter.
-    const interesting =
-      (o.flags & ObsFlag.MILITARY) !== 0 || !!boxFor(o.lat, o.lon, ctx.watchboxes);
-    if (!interesting) continue;
+
+    const isMil = (o.flags & ObsFlag.MILITARY) !== 0;
+    const altFt = o.altM != null ? o.altM * 3.28084 : null;
+
+    // GATE 1. Military aircraft skip the envelope; for everyone else, an
+    // ISR or tanker orbit has a specific altitude and speed signature and
+    // a holding stack does not.
+    if (!isMil) {
+      if ((o.sogKt ?? 0) < LOITER.minSogKt) continue;
+      if (altFt == null) continue;
+      if (altFt < LOITER.minAltFt || altFt > LOITER.maxAltFt) continue;
+      if (!boxFor(o.lat, o.lon, ctx.watchboxes)) continue;
+    } else if ((o.sogKt ?? 0) < 60) {
+      continue;
+    }
     candidates.set(o.entityId, o);
   }
   if (!candidates.size) return [];
 
   const out: Detection[] = [];
   const from = ctx.now - 45 * 60_000;
+  /** Racetracks found per cell, for the terminal-area gate. */
+  const perCell = new Map<string, number>();
+  const passed: {
+    o: Observation;
+    id: string;
+    pathM: number;
+    netM: number;
+    straightness: number;
+    turning: number;
+    durMin: number;
+    fixes: number;
+    cell: string;
+    trackSample: [number, number][];
+  }[] = [];
 
-  for (const [id, o] of [...candidates].slice(0, 60)) {
+  for (const [id, o] of [...candidates].slice(0, LOITER.maxCandidates)) {
     const track = await trackFor(id, from, ctx.now, 400);
-    if (track.length < 12) continue;
+    if (track.length < LOITER.minFixes) continue;
 
     let pathM = 0;
     let turning = 0;
@@ -762,17 +818,46 @@ export async function ruleLoiter(ctx: RuleCtx): Promise<Detection[]> {
         turning += Math.abs(angleDelta(p.cog, q.cog));
       }
     }
-    if (pathM < 60_000) continue;
+    if (pathM < LOITER.minPathM) continue;
 
     const first = track[0]!;
     const last = track[track.length - 1]!;
     const netM = haversineM(first.lat, first.lon, last.lat, last.lon);
     const straightness = netM / pathM;
-    if (straightness > 0.32) continue;
+    if (straightness > LOITER.maxStraightness) continue;
 
     const durMin = (last.ts - first.ts) / 60_000;
+    if (durMin < LOITER.minDurationMin) continue;
+
+    const cell = geohashEncode(o.lat, o.lon, 4);
+    perCell.set(cell, (perCell.get(cell) ?? 0) + 1);
+    passed.push({
+      o,
+      id,
+      pathM,
+      netM,
+      straightness,
+      turning,
+      durMin,
+      fixes: track.length,
+      cell,
+      trackSample: track
+        .filter((_, i) => i % Math.ceil(track.length / 60) === 0)
+        .map((t) => [+t.lon.toFixed(4), +t.lat.toFixed(4)]),
+    });
+  }
+
+  for (const c of passed) {
+    // GATE 2. Several aircraft flying racetracks in the same 40 km cell is
+    // an approach pattern. Military traffic is exempt: a formation of
+    // military aircraft orbiting together is the opposite of unremarkable.
+    const isMil = (c.o.flags & ObsFlag.MILITARY) !== 0;
+    if (!isMil && (perCell.get(c.cell) ?? 0) >= LOITER.terminalPerCell) continue;
+
+    const { o, id, pathM, netM, straightness, turning, durMin, fixes } = c;
     const label = (o.props?.label as string) ?? id;
     const box = boxFor(o.lat, o.lon, ctx.watchboxes);
+    const altFt = o.altM != null ? Math.round(o.altM * 3.28084) : null;
 
     out.push(
       mk({
@@ -783,8 +868,8 @@ export async function ruleLoiter(ctx: RuleCtx): Promise<Detection[]> {
             35 + (1 - straightness) * 40 + ((o.flags & ObsFlag.MILITARY) !== 0 ? 18 : 0),
           ),
         ),
-        tsStart: quantize(first.ts, 30 * 60_000),
-        tsEnd: last.ts,
+        tsStart: quantize(ctx.now - durMin * 60_000, 30 * 60_000),
+        tsEnd: ctx.now,
         lat: o.lat,
         lon: o.lon,
         entityIds: [id],
@@ -792,19 +877,26 @@ export async function ruleLoiter(ctx: RuleCtx): Promise<Detection[]> {
         summary:
           `${(pathM / 1852).toFixed(0)} nm flown over ${durMin.toFixed(0)} minutes for ` +
           `${(netM / 1852).toFixed(0)} nm of progress (straightness ${straightness.toFixed(2)}, ` +
-          `cumulative turn ${Math.round(turning)}deg). Consistent with an ISR or ` +
-          `tanker orbit rather than transit.`,
+          `cumulative turn ${Math.round(turning)}deg)` +
+          `${altFt ? ` at ${altFt.toLocaleString()} ft` : ''}. ` +
+          `${isMil ? 'Military registration. ' : ''}` +
+          `No other aircraft is flying a racetrack in this cell, so this is not ` +
+          `an approach pattern. Consistent with an ISR or tanker orbit.`,
         evidence: {
           pathNm: +(pathM / 1852).toFixed(1),
           netNm: +(netM / 1852).toFixed(1),
           straightness: +straightness.toFixed(3),
           cumulativeTurnDeg: Math.round(turning),
           durationMin: +durMin.toFixed(1),
-          samples: track.length,
-          military: (o.flags & ObsFlag.MILITARY) !== 0,
-          trackSample: track
-            .filter((_, i) => i % Math.ceil(track.length / 60) === 0)
-            .map((t) => [+t.lon.toFixed(4), +t.lat.toFixed(4)]),
+          altFt,
+          speedKt: o.sogKt,
+          samples: fixes,
+          military: isMil,
+          cell: c.cell,
+          racetracksInCell: perCell.get(c.cell) ?? 1,
+          gatesPassed: ['kinematics', 'not-terminal-area', 'geometry'],
+          thresholds: LOITER,
+          trackSample: c.trackSample,
         },
         provenanceIds: ctx.provenanceIds.slice(0, 4),
       }),

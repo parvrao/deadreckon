@@ -45,8 +45,10 @@ const LIMITS: Record<string, string[]> = {
     'Two hulls alongside is not evidence of a transfer, only of the conditions under which one is possible.',
   ],
   LOITER: [
-    'Holding patterns near congested airports look the same.',
-    'Search and rescue, survey and training flights also orbit.',
+    'A holding pattern and an ISR orbit are geometrically identical. Only the altitude band, speed and the absence of other racetracks in the same cell separate them here.',
+    'The terminal-area filter is a density heuristic, not an airport dataset. A quiet airfield with one aircraft in the hold can still slip through.',
+    'Search and rescue, survey, aerial refuelling and training flights all orbit legitimately.',
+    'Military aircraft bypass the altitude and speed gates, so a low, slow military orbit is reported on registration alone.',
   ],
   SEISMIC_SHALLOW: [
     'Preliminary USGS depths are frequently revised, often substantially.',

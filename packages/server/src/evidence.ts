@@ -88,11 +88,15 @@ const METHOD: Record<string, { description: string; limitations: string[] }> = {
   },
   LOITER: {
     description:
-      'Track straightness (net displacement / path length) below 0.32 over at ' +
-      'least 60 km of flown path. Consistent with an ISR or tanker orbit.',
+      'Track straightness (net displacement / path length) below 0.25 over at ' +
+      'least 150 km of flown path and 25 minutes, at 18,000-55,000 ft and above ' +
+      '150 kt, with no other racetrack in the same 40 km cell. Military ' +
+      'registration bypasses the altitude and speed gates.',
     limitations: [
-      'Holding patterns near congested airports produce the same signature.',
-      'Search and rescue, survey and training flights also orbit.',
+      'A holding pattern and an ISR orbit are geometrically identical. Only altitude, speed and the absence of neighbouring racetracks separate them.',
+      'The terminal-area filter is a density heuristic, not an airport dataset.',
+      'Search and rescue, survey, aerial refuelling and training flights all orbit legitimately.',
+      'Military aircraft are reported on registration alone, so a low slow military orbit passes on weaker evidence.',
     ],
   },
   SEISMIC_SHALLOW: {
