@@ -26,7 +26,7 @@ services:
     plan: free
     region: oregon
     branch: main
-    buildCommand: npm ci && npm run build:server && npm run migrate
+    buildCommand: npm ci --include=dev && npm run build:server && npm run migrate
     startCommand: node packages/server/dist/index.js
     healthCheckPath: /api/health
     autoDeploy: true
@@ -50,7 +50,7 @@ services:
     name: deadreckon-web
     runtime: static
     branch: main
-    buildCommand: npm ci && npm run build:web
+    buildCommand: npm ci --include=dev && npm run build:web
     staticPublishPath: ./apps/web/dist
     autoDeploy: true
     envVars:
