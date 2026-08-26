@@ -359,6 +359,59 @@ export async function snapshotAt(
   return rows;
 }
 
+/**
+ * Everything known about one target.
+ *
+ * The wire protocol carries 28 bytes per contact: position, altitude,
+ * course, speed, flags. That is the right trade for a stream pushing
+ * thousands of contacts a second, but it means identity never reaches the
+ * browser -- MMSI, IMO, call sign, destination, registration, ship type,
+ * flag state all live here and only here.
+ *
+ * So clicking a contact fetches it. One row, on demand, for the one target
+ * a human is actually looking at.
+ */
+export async function entityById(entityId: string): Promise<
+  | (EntityRow & {
+      first_seen: number;
+      props: Record<string, unknown>;
+      source_ids: number[];
+      observation_count: number;
+    })
+  | null
+> {
+  const { rows } = await getPool().query(
+    `SELECT e.entity_id, e.domain, e.label, e.kind, e.flag,
+            e.first_seen, e.last_seen, e.last_lat, e.last_lon,
+            e.last_sog_kt, e.last_cog_deg, e.last_alt_m, e.flags,
+            e.geohash5, e.props,
+            (SELECT array_agg(DISTINCT o.source_id)
+               FROM observation o
+              WHERE o.entity_id = e.entity_id) AS source_ids,
+            (SELECT count(*) FROM observation o
+              WHERE o.entity_id = e.entity_id) AS observation_count
+       FROM entity e
+      WHERE e.entity_id = $1`,
+    [entityId],
+  );
+  return (rows[0] as never) ?? null;
+}
+
+/** Detections that named this target, newest first. */
+export async function detectionsForEntity(
+  entityId: string,
+  limit = 20,
+): Promise<DetectionRow[]> {
+  const { rows } = await getPool().query<DetectionRow>(
+    `SELECT * FROM detection
+      WHERE $1 = ANY(entity_ids)
+      ORDER BY ts_start DESC
+      LIMIT $2`,
+    [entityId, limit],
+  );
+  return rows;
+}
+
 export async function trackFor(
   entityId: string,
   fromMs: number,

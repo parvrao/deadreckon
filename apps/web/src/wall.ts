@@ -103,6 +103,7 @@ export class Wall {
     private readonly onMove: (b: LngLatBounds, zoom: number) => void,
     private readonly onLayerError?: (id: string) => void,
     private readonly onCameraPick?: (c: Camera) => void,
+    private readonly onContactPick?: (c: Contact) => void,
   ) {
     this.map = new MapLibreMap({
       container,
@@ -390,9 +391,12 @@ export class Wall {
       this.colors[i * 4 + 2] = col[2]!;
       this.colors[i * 4 + 3] = col[3]!;
 
+      // Sized to be seen. The first version was 2px against photoreal
+      // satellite imagery, which is a pixel of cyan on a pixel of ocean --
+      // technically plotted, practically invisible.
       const big =
-        (c.flags & (ObsFlag.EMERGENCY | ObsFlag.MILITARY)) !== 0 ? 1.9 : 1;
-      this.radii[i] = (c.domain === 2 ? 2.4 : 2.0) * big;
+        (c.flags & (ObsFlag.EMERGENCY | ObsFlag.MILITARY)) !== 0 ? 1.8 : 1;
+      this.radii[i] = (c.domain === 2 ? 4.6 : 4.0) * big;
 
       // A short velocity vector reads as motion in a still frame and
       // makes heading legible without drawing an icon per contact.
@@ -533,6 +537,28 @@ export class Wall {
             pickable: false,
           }),
 
+        // A dim halo under the contacts. Against Blue Marble or a
+        // true-colour scene, a solid dot alone disappears into terrain;
+        // a dark ring around it holds separation at any zoom.
+        n > 0 &&
+          new ScatterplotLayer({
+            id: 'contact-halo',
+            data: {
+              length: n,
+              attributes: {
+                getPosition: { value: this.positions, size: 2 },
+                getRadius: { value: this.radii, size: 1 },
+              },
+            },
+            radiusUnits: 'pixels',
+            radiusScale: 2.1,
+            radiusMinPixels: 6,
+            radiusMaxPixels: 30,
+            getFillColor: [4, 7, 11, 130],
+            pickable: false,
+            updateTriggers: { all: n },
+          }),
+
         // Contacts, from binary attributes.
         n > 0 &&
           new ScatterplotLayer({
@@ -546,12 +572,24 @@ export class Wall {
               },
             },
             radiusUnits: 'pixels',
-            radiusMinPixels: 1.4,
-            radiusMaxPixels: 9,
+            radiusMinPixels: 3.2,
+            radiusMaxPixels: 15,
+            stroked: true,
+            lineWidthUnits: 'pixels',
+            getLineWidth: 1,
+            getLineColor: [4, 7, 11, 220],
             pickable: true,
+            // Generous hit area. A 4px dot is a hard click target on a
+            // globe you are also dragging.
+            radiusScale: 1,
             onHover: (info) => {
               const c = info.index >= 0 ? this.contacts[info.index] : null;
               this.onPick(c ?? null);
+            },
+            onClick: (info) => {
+              const c = info.index >= 0 ? this.contacts[info.index] : null;
+              if (c) this.onContactPick?.(c);
+              return true;
             },
             updateTriggers: { all: n },
           }),

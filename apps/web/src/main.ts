@@ -124,6 +124,7 @@ function mount(watchboxes: WatchBox[]): void {
     },
     (id) => panel?.markFailing(id),
     (c) => openCamera(c),
+    (c) => void openContact(c.id),
   );
   wall.setWatchboxes(watchboxes);
 
@@ -253,6 +254,158 @@ function mount(watchboxes: WatchBox[]): void {
     if (n >= 1 && n <= 5) panel.open(tabs[n - 1]!);
     if (e.key === 'g' || e.key === 'G') $('#proj-toggle').click();
   });
+}
+
+/* ------------------------------------------------------------- contacts */
+
+/**
+ * Everything the feeds know about one target.
+ *
+ * The wire carries 28 bytes per contact, which is the right trade for a
+ * stream but means identity never reaches the browser. So this fetches it
+ * on click: MMSI, IMO, call sign, destination, registration, ship type,
+ * flag state, plus how long we have been watching and every detection that
+ * has named it.
+ */
+async function openContact(entityId: string): Promise<void> {
+  const el = $('#casefile');
+  el.hidden = false;
+  el.innerHTML =
+    '<div class="cf-head"><div><div class="k">CONTACT</div>' +
+    '<h2>reading...</h2></div></div>';
+
+  try {
+    const d = await getJson<{
+      entity: Record<string, unknown>;
+      track: { ts: number; lat: number; lon: number; sog: number | null; cog: number | null }[];
+      detections: { id: number; rule: string; severity: number; ts_start: number; title: string }[];
+    }>(`/api/entity/${encodeURIComponent(entityId)}`);
+
+    const e = d.entity;
+    const props = (e.props ?? {}) as Record<string, unknown>;
+    const kt = (v: unknown): string => (v == null ? '—' : `${Number(v).toFixed(1)} kt`);
+    const deg = (v: unknown): string => (v == null ? '—' : `${Number(v).toFixed(0)}°`);
+    const ft = (v: unknown): string =>
+      v == null ? '—' : `${Math.round(Number(v) * 3.28084).toLocaleString()} ft`;
+
+    // Show every property the feed gave us, not a curated subset. If the
+    // upstream knows it, the reader should be able to see it.
+    const known = new Set(['label', 'kind', 'flag']);
+    const extra = Object.entries(props)
+      .filter(([k, v]) => !known.has(k) && v !== null && v !== undefined && v !== '')
+      .map(
+        ([k, v]) =>
+          `<dt>${esc(k.replace(/([A-Z])/g, ' $1').toLowerCase())}</dt><dd>${esc(
+            typeof v === 'object' ? JSON.stringify(v) : String(v),
+          )}</dd>`,
+      )
+      .join('');
+
+    const watchedH = (Date.now() - Number(e.first_seen)) / 3600_000;
+
+    el.innerHTML = `
+      <div class="cf-head">
+        <div>
+          <div class="k">CONTACT &middot; ${esc(String(e.domainName ?? '').toUpperCase())}${
+            e.kind ? ` &middot; ${esc(String(e.kind))}` : ''
+          }</div>
+          <h2>${esc(String(e.label ?? entityId))}</h2>
+        </div>
+        <button class="x" id="cf-x" title="close (esc)">&times;</button>
+      </div>
+      <div class="cf-body">
+
+        <div class="sec">
+          <h3>NOW</h3>
+          <dl class="kv">
+            <dt>position</dt><dd>${Number(e.last_lat).toFixed(5)}, ${Number(e.last_lon).toFixed(5)}</dd>
+            <dt>speed over ground</dt><dd>${kt(e.last_sog_kt)}</dd>
+            <dt>course over ground</dt><dd>${deg(e.last_cog_deg)}</dd>
+            ${e.last_alt_m != null ? `<dt>altitude</dt><dd>${ft(e.last_alt_m)}</dd>` : ''}
+            <dt>last report</dt><dd>${ago(Number(e.last_seen))} ago</dd>
+            <dt>cell</dt><dd>${esc(String(e.geohash5 ?? ''))}</dd>
+          </dl>
+        </div>
+
+        <div class="sec">
+          <h3>IDENTITY</h3>
+          <dl class="kv">
+            <dt>id</dt><dd>${esc(String(e.entity_id))}</dd>
+            ${e.kind ? `<dt>type</dt><dd>${esc(String(e.kind))}</dd>` : ''}
+            ${e.flag ? `<dt>flag</dt><dd>${esc(String(e.flag))}</dd>` : ''}
+            ${extra || '<dt>—</dt><dd>the feed gave us nothing beyond position</dd>'}
+          </dl>
+        </div>
+
+        <div class="sec">
+          <h3>HISTORY</h3>
+          <dl class="kv">
+            <dt>first seen</dt><dd>${new Date(Number(e.first_seen)).toISOString().slice(0, 16)}Z</dd>
+            <dt>tracked for</dt><dd>${
+              watchedH < 48 ? `${watchedH.toFixed(1)} hours` : `${(watchedH / 24).toFixed(1)} days`
+            }</dd>
+            <dt>observations</dt><dd>${Number(e.observation_count ?? 0).toLocaleString()}</dd>
+            <dt>track points (12h)</dt><dd>${d.track.length.toLocaleString()}</dd>
+          </dl>
+        </div>
+
+        <div class="sec">
+          <h3>SOURCES</h3>
+          ${
+            ((e.sources ?? []) as { key: string; label: string; license: string }[]).length
+              ? `<div class="chain">${((e.sources ?? []) as { key: string; label: string; license: string }[])
+                  .map(
+                    (s) =>
+                      `<div class="lnk"><span class="n">·</span><span>
+                         <b style="color:var(--txt-hot)">${esc(s.label)}</b><br>
+                         <span class="dim">${esc(s.license)}</span></span></div>`,
+                  )
+                  .join('')}</div>`
+              : '<p class="caveat">No source recorded.</p>'
+          }
+        </div>
+
+        <div class="sec">
+          <h3>DETECTIONS NAMING THIS TARGET &mdash; ${d.detections.length}</h3>
+          ${
+            d.detections.length
+              ? d.detections
+                  .map(
+                    (x) => `
+                <div class="ev" data-det="${x.id}">
+                  <div class="ev-top">
+                    <span class="sev" style="background:rgb(${sevColor(x.severity, 255)
+                      .slice(0, 3)
+                      .join(',')})">${x.severity}</span>
+                    <span class="ev-rule">${esc(x.rule.replace(/_/g, ' '))}</span>
+                    <span class="ev-t">${ago(x.ts_start)}</span>
+                  </div>
+                  <div class="ev-title">${esc(x.title)}</div>
+                </div>`,
+                  )
+                  .join('')
+              : '<p class="caveat">Nothing has been flagged about this target. Most targets never are.</p>'
+          }
+        </div>
+      </div>`;
+
+    el.querySelector('#cf-x')?.addEventListener('click', closeCase);
+    el.querySelectorAll('[data-det]').forEach((n) =>
+      n.addEventListener('click', () =>
+        void openCase(Number((n as HTMLElement).dataset.det)),
+      ),
+    );
+
+    // Draw its recent track so the panel and the map agree.
+    wall.setTrack(d.track.map((p) => [p.lon, p.lat] as [number, number]));
+    wall.setCone(null);
+  } catch (err) {
+    el.innerHTML =
+      `<div class="cf-head"><div><div class="k">CONTACT</div>` +
+      `<h2>could not read</h2></div><button class="x" id="cf-x">&times;</button></div>` +
+      `<div class="cf-body"><pre class="blk">${esc((err as Error).message)}</pre></div>`;
+    el.querySelector('#cf-x')?.addEventListener('click', closeCase);
+  }
 }
 
 /* ------------------------------------------------------------- cameras */

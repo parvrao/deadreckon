@@ -28,6 +28,8 @@ import {
   archiveStats,
   closePool,
   detectionById,
+  detectionsForEntity,
+  entityById,
   getPool,
   ingestHealth,
   recentDetections,
@@ -352,6 +354,37 @@ app.get('/api/replay', async (req, reply) => {
 
   const entities = rows.filter((r) => inBox(r.last_lat, r.last_lon));
   return { at, entities, count: entities.length, scanned: rows.length };
+});
+
+/**
+ * Everything known about one contact.
+ *
+ * Fetched on click rather than streamed, because identity is static per
+ * target and pushing it to every viewer for every contact would undo the
+ * entire point of a 28-byte wire record.
+ */
+app.get('/api/entity/:entityId', async (req, reply) => {
+  const { entityId } = req.params as { entityId: string };
+  const e = await entityById(entityId);
+  if (!e) return reply.code(404).send({ error: 'no such entity' });
+
+  const [track, detections] = await Promise.all([
+    trackFor(entityId, Date.now() - 12 * 3600_000, Date.now(), 2000),
+    detectionsForEntity(entityId, 20),
+  ]);
+
+  return {
+    entity: {
+      ...e,
+      domainName: DOMAIN_NAME[e.domain as 1 | 2 | 3 | 4 | 5 | 6] ?? String(e.domain),
+      sources: (e.source_ids ?? [])
+        .map((id: number) => SOURCES.find((s) => s.id === id))
+        .filter(Boolean)
+        .map((s) => ({ key: s!.key, label: s!.label, license: s!.license })),
+    },
+    track,
+    detections,
+  };
 });
 
 app.get('/api/track/:entityId', async (req) => {
