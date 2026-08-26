@@ -49,7 +49,6 @@ services:
   - type: web
     name: deadreckon-web
     runtime: static
-    plan: free
     branch: main
     buildCommand: npm ci && npm run build:web
     staticPublishPath: ./apps/web/dist
