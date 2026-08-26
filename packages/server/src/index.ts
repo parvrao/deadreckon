@@ -57,25 +57,91 @@ await app.register(cors, {
 
 getPool({ label: 'api', max: 5 });
 
+/**
+ * Fail informatively.
+ *
+ * A rotated database credential used to surface here as a bare `500
+ * Internal Server Error` with no body, which told the operator nothing and
+ * cost two debugging round trips to identify. A dependency being down is
+ * not an internal error and should not be reported as one.
+ *
+ * Postgres error codes are five characters (SQLSTATE). When we see one we
+ * return 503, name the code, and say what to actually do about it. The
+ * failure mode a system exhibits under a broken dependency is part of its
+ * design, not an afterthought.
+ */
+const PG_HINT: Record<string, string> = {
+  '28000':
+    'The API is authenticating with a credential that no longer permits login. ' +
+    'If you rotated database credentials, run a Blueprint Manual sync so the ' +
+    'fromDatabase env var re-resolves, then let the service redeploy.',
+  '28P01': 'Password authentication failed. The stored DATABASE_URL is stale.',
+  '3D000': 'The named database does not exist. Check DATABASE_URL.',
+  '42P01':
+    'A table is missing. The migration has not run against this database: ' +
+    'npm run migrate.',
+  '53300': 'Too many connections. Lower the pool size or add a connection pooler.',
+  '57P01': 'The database is shutting down or restarting. This is usually transient.',
+  '08006': 'Connection failure. Check the database is running and the IP allow list.',
+  '08001': 'Cannot open a connection. Check the host, port and IP allow list.',
+};
+
+app.setErrorHandler((err, req, reply) => {
+  const code = (err as { code?: string }).code;
+  const isPg = typeof code === 'string' && /^[0-9A-Za-z]{5}$/.test(code);
+
+  if (isPg || code === 'ECONNREFUSED' || code === 'ETIMEDOUT') {
+    req.log.error({ code, err: err.message }, 'dependency failure');
+    return reply.code(503).send({
+      error: 'database_unavailable',
+      code: code ?? null,
+      detail: err.message,
+      hint:
+        (code && PG_HINT[code]) ??
+        'The API could not query its database. Check /api/health and the ingest health table.',
+      docs: '/api/health',
+    });
+  }
+
+  req.log.error({ err }, 'unhandled');
+  return reply.code(500).send({
+    error: 'internal',
+    detail: err.message,
+  });
+});
+
 /* ------------------------------------------------------------------ meta */
 
 app.get('/api/health', async () => {
   const t0 = Date.now();
   let db = 'down';
   let dbMs = -1;
+  let dbError: { code: string | null; detail: string; hint: string } | null = null;
+
   try {
     await getPool().query('SELECT 1');
     db = 'up';
     dbMs = Date.now() - t0;
-  } catch {
-    /* reported as down */
+  } catch (err) {
+    // Say WHY, not just that it is down. "db: down" with no reason is the
+    // same dead end as a bare 500.
+    const e = err as { code?: string; message?: string };
+    dbError = {
+      code: e.code ?? null,
+      detail: e.message ?? String(err),
+      hint:
+        (e.code && PG_HINT[e.code]) ??
+        'Check DATABASE_URL, the database status, and its IP allow list.',
+    };
   }
+
   return {
     service: 'deadreckon-api',
     status: db === 'up' ? 'ok' : 'degraded',
     uptimeS: Math.round((Date.now() - STARTED) / 1000),
     db,
     dbLatencyMs: dbMs,
+    ...(dbError ? { dbError } : {}),
     hub: hubStats(),
   };
 });
