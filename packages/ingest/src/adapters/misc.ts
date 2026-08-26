@@ -196,7 +196,17 @@ export async function fetchTles(
   return { tles, raw };
 }
 
-/** Groups worth watching. `active` is 11k+ objects and mostly debris. */
+/**
+ * Groups worth watching. `active` is 11k+ objects and mostly debris.
+ *
+ * `starlink` was here and has been removed. It is 10,736 element sets, it
+ * took five minutes to fetch, and it starved the entire collection window
+ * on the first scheduled run. It is also analytically worthless for this
+ * project: a uniform constellation passing over everything all the time
+ * carries no information about anything. The satellites that matter are
+ * the ones whose presence over a place is a choice -- reconnaissance,
+ * SAR, earth observation.
+ */
 export const TLE_GROUPS = [
   'stations',
   'visual',
@@ -204,7 +214,6 @@ export const TLE_GROUPS = [
   'sarsat',
   'planet',
   'spire',
-  'starlink',
   'military', // not an official group on all mirrors; failure is tolerated
 ] as const;
 

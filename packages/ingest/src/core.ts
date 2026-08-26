@@ -257,6 +257,15 @@ export class Ingest {
          updated_at timestamptz NOT NULL DEFAULT now())`,
     );
 
+    // Starlink used to be in TLE_GROUPS. Rows from before that change are
+    // dead weight in the table and noise in /api/tles, so clear them once.
+    await pool
+      .query(`DELETE FROM tle WHERE grp = 'starlink'`)
+      .then((r) => {
+        if (r.rowCount) console.log(`[orbit] pruned ${r.rowCount} stale starlink rows`);
+      })
+      .catch(() => {});
+
     if (maxAgeS > 0) {
       const { rows } = await pool.query<{ fresh: boolean }>(
         `SELECT coalesce(max(updated_at) > now() - ($1 || ' seconds')::interval, false) AS fresh
