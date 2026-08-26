@@ -39,18 +39,31 @@ import {
   type Bounds,
   type WireRecord,
 } from '@deadreckon/core';
-import { entitiesInCells, snapshotAt, type EntityRow } from '@deadreckon/store';
+import { entitiesRecent, snapshotAt, type EntityRow } from '@deadreckon/store';
 
 const TICK_MS = Number(process.env.FANOUT_TICK_MS) || 1000;
 const MAX_CELLS = Number(process.env.MAX_CELLS_PER_SOCKET) || 512;
 const MAX_ENTITIES_PER_SOCKET = 8000;
-const LIVE_MAX_AGE_S = 900;
+/**
+ * How stale a contact may be and still be drawn.
+ *
+ * Was 900s. With ingest on a five-minute cron rather than a continuous
+ * worker, a fifteen-minute window empties the board between runs and the
+ * console looks broken while working perfectly. Forty-five minutes covers
+ * several missed runs; anything older is drawn dimmed as stale by the
+ * client anyway.
+ */
+const LIVE_MAX_AGE_S = Number(process.env.LIVE_MAX_AGE_S) || 2700;
 /** Do not resend a position that has not moved and is not stale. */
 const RESEND_AFTER_MS = 20_000;
 
 interface Client {
   id: number;
   ws: WebSocket;
+  /** The viewport itself. Cells are for fan-out bookkeeping only -- they
+   *  are NOT a query predicate. Treating them as one is what made the
+   *  entire read path return nothing. */
+  bbox: Bounds | null;
   cells: string[];
   domains: number[];
   /** entityId -> ref, assigned per socket so refs stay small. */
@@ -71,7 +84,7 @@ let clientSeq = 0;
 const clients = new Map<number, Client>();
 
 /** Shared snapshot, rebuilt once per tick regardless of client count. */
-let cellIndex = new Map<string, EntityRow[]>();
+let liveRows: EntityRow[] = [];
 let snapshotAtMs = 0;
 let lastTickMs = 0;
 let lastTickEntities = 0;
@@ -82,6 +95,7 @@ export function attach(ws: WebSocket): void {
   const c: Client = {
     id: ++clientSeq,
     ws,
+    bbox: null,
     cells: [],
     domains: [1, 2, 4, 5],
     refs: new Map(),
@@ -131,7 +145,9 @@ function handle(c: Client, msg: Record<string, unknown>): void {
       const bbox = msg.bbox as Bounds | undefined;
       if (!bbox || !Number.isFinite(bbox.minLat)) return;
 
-      // The client does not get to choose how many cells it costs us.
+      c.bbox = normalizeBounds(bbox);
+      // Cells are still computed, for reporting and for future per-cell
+      // fan-out. They are no longer used to select rows.
       const precision = precisionForBounds(bbox, 256);
       c.cells = cellsForBounds(bbox, precision, MAX_CELLS);
 
@@ -197,32 +213,25 @@ export function startHub(): () => void {
 
 async function tick(): Promise<void> {
   if (clients.size === 0) {
-    cellIndex = new Map();
+    liveRows = [];
     return;
   }
   const t0 = Date.now();
 
-  // The union of every client's interest. One query covers all of them.
-  const wanted = new Set<string>();
+  // The union of every live client's domains. One query covers all of them.
   const domains = new Set<number>();
   let anyLive = false;
   for (const c of clients.values()) {
     if (c.replayAt == null) {
       anyLive = true;
-      for (const cell of c.cells) wanted.add(cell);
       for (const d of c.domains) domains.add(d);
     }
   }
 
-  if (anyLive && wanted.size) {
+  if (anyLive && domains.size) {
     try {
-      const rows = await entitiesInCells(
-        [...wanted],
-        [...domains],
-        LIVE_MAX_AGE_S,
-        40_000,
-      );
-      cellIndex = indexByCell(rows);
+      const rows = await entitiesRecent([...domains], LIVE_MAX_AGE_S, 40_000);
+      liveRows = rows;
       snapshotAtMs = Date.now();
       lastTickEntities = rows.length;
     } catch (err) {
@@ -241,24 +250,15 @@ async function tick(): Promise<void> {
   lastTickMs = Date.now() - t0;
 }
 
-function indexByCell(rows: EntityRow[]): Map<string, EntityRow[]> {
-  const idx = new Map<string, EntityRow[]>();
-  for (const r of rows) {
-    const cell = r.geohash5;
-    const list = idx.get(cell);
-    if (list) list.push(r);
-    else idx.set(cell, [r]);
-  }
-  return idx;
-}
-
 async function pushTo(c: Client): Promise<void> {
-  if (c.ws.readyState !== 1 || !c.cells.length) return;
+  if (c.ws.readyState !== 1) return;
 
   // A scrubbing client reads the archive; it does not share the live index.
   const rows: EntityRow[] =
     c.replayAt != null
-      ? await snapshotAt(c.replayAt, c.cells, c.domains, 180, MAX_ENTITIES_PER_SOCKET)
+      ? (await snapshotAt(c.replayAt, c.domains, 180, MAX_ENTITIES_PER_SOCKET)).filter(
+          (r) => !c.bbox || inBounds(r.last_lat, r.last_lon, c.bbox),
+        )
       : gatherLive(c);
 
   const now = Date.now();
@@ -329,19 +329,49 @@ async function pushTo(c: Client): Promise<void> {
   }
 }
 
+/**
+ * Filter the shared snapshot to one client's viewport.
+ *
+ * A bounding-box test over a few thousand rows, per socket, per second.
+ * That is nothing, and it is correct at every zoom level -- which the
+ * geohash equality it replaced was not.
+ */
 function gatherLive(c: Client): EntityRow[] {
   const out: EntityRow[] = [];
   const want = new Set(c.domains);
-  for (const cell of c.cells) {
-    const list = cellIndex.get(cell);
-    if (!list) continue;
-    for (const r of list) {
-      if (!want.has(r.domain)) continue;
-      out.push(r);
-      if (out.length >= MAX_ENTITIES_PER_SOCKET) return out;
-    }
+  const b = c.bbox;
+
+  for (const r of liveRows) {
+    if (!want.has(r.domain)) continue;
+    if (b && !inBounds(r.last_lat, r.last_lon, b)) continue;
+    out.push(r);
+    if (out.length >= MAX_ENTITIES_PER_SOCKET) break;
   }
   return out;
+}
+
+/** Latitude clamped; longitude handles a viewport straddling the antimeridian. */
+function inBounds(lat: number, lon: number, b: Bounds): boolean {
+  if (lat < b.minLat || lat > b.maxLat) return false;
+  return b.minLon <= b.maxLon
+    ? lon >= b.minLon && lon <= b.maxLon
+    : lon >= b.minLon || lon <= b.maxLon;
+}
+
+/**
+ * A globe at low zoom reports bounds wider than the world, and MapLibre
+ * can hand back longitudes outside [-180,180] after panning. Left alone,
+ * that silently excludes everything.
+ */
+function normalizeBounds(b: Bounds): Bounds {
+  const wrap = (x: number): number => ((((x + 180) % 360) + 360) % 360) - 180;
+  const spansWorld = b.maxLon - b.minLon >= 359.9;
+  return {
+    minLat: Math.max(-90, Math.min(90, b.minLat)),
+    maxLat: Math.max(-90, Math.min(90, b.maxLat)),
+    minLon: spansWorld ? -180 : wrap(b.minLon),
+    maxLon: spansWorld ? 180 : wrap(b.maxLon),
+  };
 }
 
 /* ------------------------------------------------------------ broadcast */
@@ -428,7 +458,7 @@ export function hubStats() {
     tickMs: lastTickMs,
     tickBudgetMs: TICK_MS,
     entitiesInSharedSnapshot: lastTickEntities,
-    cellsIndexed: cellIndex.size,
+    cellsIndexed: liveRows.length,
     trackedAcrossClients: tracked,
     bytesOutTotal: bytes,
     /** Upstream fetches caused by these clients. Always zero. That is the point. */

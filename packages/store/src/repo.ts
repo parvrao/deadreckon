@@ -273,37 +273,66 @@ export interface EntityRow {
   geohash5: string;
 }
 
-export async function entitiesInCells(
-  cells: readonly string[],
+/**
+ * Everything seen recently, in one query, shared by every socket.
+ *
+ * THIS REPLACES A BUG THAT MADE THE ENTIRE READ PATH RETURN NOTHING.
+ *
+ * The previous version took the geohash cells a client had subscribed to
+ * and matched them against `entity.geohash5` with `=`. But a client sizes
+ * its cells to its viewport: at globe zoom it sends two-character cells
+ * like 'tx', and `'tx' = 'thrr3'` is never true. Exact equality against a
+ * fixed-width column only matches when the client happens to have chosen
+ * precision 5, which at any usable zoom it does not.
+ *
+ * So the console showed zero contacts from the first commit onwards, with
+ * a quarter of a million observations sitting in the table. Every symptom
+ * pointed at ingest, and ingest was fine the whole time.
+ *
+ * The fix is to stop matching cells at all. The set of entities seen in
+ * the last N minutes is small -- thousands, not millions -- and
+ * `(domain, last_seen DESC)` is already an index. Fetch that set once per
+ * tick and let the hub filter it per client viewport in memory, which is
+ * a bounding-box test on a few thousand rows and costs nothing.
+ *
+ * Geohash is still exactly right for fan-out bucketing and for detection
+ * addressing. It was only ever wrong as a query predicate.
+ */
+export async function entitiesRecent(
   domains: readonly number[],
   maxAgeS: number,
-  limit = 20000,
+  limit = 40000,
 ): Promise<EntityRow[]> {
-  if (cells.length === 0) return [];
+  if (domains.length === 0) return [];
   const { rows } = await getPool().query<EntityRow>(
     `SELECT entity_id, domain, label, kind, flag,
             last_seen, last_lat, last_lon,
             last_sog_kt, last_cog_deg, last_alt_m, flags, geohash5
        FROM entity
-      WHERE geohash5 = ANY($1::char(5)[])
-        AND domain    = ANY($2::smallint[])
-        AND last_seen > now() - ($3 || ' seconds')::interval
+      WHERE domain    = ANY($1::smallint[])
+        AND last_seen > now() - ($2 || ' seconds')::interval
       ORDER BY last_seen DESC
-      LIMIT $4`,
-    [cells, domains, String(maxAgeS), limit],
+      LIMIT $3`,
+    [domains, String(maxAgeS), limit],
   );
   return rows;
 }
 
-/** The Scrubber's query: reconstruct a moment from the archive. */
+/**
+ * The Scrubber's query: reconstruct a moment from the archive.
+ *
+ * Had the same cell-matching bug as the live path, so replay was equally
+ * blank. Bounded here by the time window rather than by geography: a
+ * three-minute slice of observations is small, and the hub filters it to
+ * each client's viewport.
+ */
 export async function snapshotAt(
   atMs: number,
-  cells: readonly string[],
   domains: readonly number[],
-  windowS = 120,
-  limit = 20000,
+  windowS = 180,
+  limit = 40000,
 ): Promise<EntityRow[]> {
-  if (cells.length === 0) return [];
+  if (domains.length === 0) return [];
   const { rows } = await getPool().query<EntityRow>(
     `SELECT DISTINCT ON (entity_id)
             entity_id,
@@ -320,13 +349,12 @@ export async function snapshotAt(
             flags,
             geohash5
        FROM observation
-      WHERE geohash5 = ANY($1::char(5)[])
-        AND domain    = ANY($2::smallint[])
-        AND ts <= to_timestamp($3 / 1000.0)
-        AND ts >  to_timestamp($3 / 1000.0) - ($4 || ' seconds')::interval
+      WHERE domain = ANY($1::smallint[])
+        AND ts <= to_timestamp($2 / 1000.0)
+        AND ts >  to_timestamp($2 / 1000.0) - ($3 || ' seconds')::interval
       ORDER BY entity_id, ts DESC
-      LIMIT $5`,
-    [cells, domains, atMs, String(windowS), limit],
+      LIMIT $4`,
+    [domains, atMs, String(windowS), limit],
   );
   return rows;
 }

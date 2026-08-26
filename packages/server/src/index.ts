@@ -32,6 +32,7 @@ import {
   ingestHealth,
   recentDetections,
   recentIncidents,
+  snapshotAt,
   trackFor,
 } from '@deadreckon/store';
 import { attach, startHub, hubStats, broadcastEvent } from './hub.js';
@@ -329,33 +330,28 @@ app.get('/api/replay', async (req, reply) => {
   const at = Number(q.at);
   if (!Number.isFinite(at)) return reply.code(400).send({ error: 'at (ms) required' });
 
-  const bbox: Bounds = {
-    minLat: Number(q.minLat ?? -90),
-    minLon: Number(q.minLon ?? -180),
-    maxLat: Number(q.maxLat ?? 90),
-    maxLon: Number(q.maxLon ?? 180),
-  };
-  const precision = precisionForBounds(bbox, 256);
-  const cells = cellsForBounds(bbox, precision, 512);
   const domains = (q.domains ?? 'air,sea')
     .split(',')
-    .map((n) => Object.entries(DOMAIN_NAME).find(([, v]) => v === n)?.[0])
-    .filter(Boolean)
-    .map(Number);
+    .map((n) => Number(Object.entries(DOMAIN_NAME).find(([, v]) => v === n)?.[0]))
+    .filter((n) => Number.isFinite(n));
 
-  const { rows } = await getPool().query(
-    `SELECT DISTINCT ON (entity_id)
-            entity_id, domain, ts, lat, lon, sog_kt, cog_deg, alt_m, flags
-       FROM observation
-      WHERE geohash5 = ANY($1::char(5)[]) AND domain = ANY($2::smallint[])
-        AND ts <= to_timestamp($3/1000.0)
-        AND ts >  to_timestamp($3/1000.0) - interval '3 minutes'
-      ORDER BY entity_id, ts DESC
-      LIMIT 20000`,
-    [cells, domains.length ? domains : [1, 2], at],
-  );
+  // Bounded by time, then filtered by geography in memory. The previous
+  // version matched client geohash cells against observation.geohash5 with
+  // '=', which only ever matched when the client happened to pick
+  // precision 5 -- so replay returned nothing at any usable zoom.
+  const rows = await snapshotAt(at, domains.length ? domains : [1, 2], 180, 40_000);
 
-  return { at, cells: cells.length, precision, entities: rows, count: rows.length };
+  const minLat = Number(q.minLat ?? -90);
+  const maxLat = Number(q.maxLat ?? 90);
+  const minLon = Number(q.minLon ?? -180);
+  const maxLon = Number(q.maxLon ?? 180);
+  const inBox = (la: number, lo: number): boolean =>
+    la >= minLat &&
+    la <= maxLat &&
+    (minLon <= maxLon ? lo >= minLon && lo <= maxLon : lo >= minLon || lo <= maxLon);
+
+  const entities = rows.filter((r) => inBox(r.last_lat, r.last_lon));
+  return { at, entities, count: entities.length, scanned: rows.length };
 });
 
 app.get('/api/track/:entityId', async (req) => {
